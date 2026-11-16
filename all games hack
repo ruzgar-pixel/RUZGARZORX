@@ -4,13 +4,41 @@ local Players, UIS, RS, TS = game:GetService("Players"), game:GetService("UserIn
 local SoundService, Lighting = game:GetService("SoundService"), game:GetService("Lighting")
 local lp, mobile = Players.LocalPlayer, UIS.TouchEnabled
 local cam = workspace.CurrentCamera
-workspace:GetPropertyChangedSignal("CurrentCamera"):Connect(function()
-	cam = workspace.CurrentCamera
-end)
 
-local S = { speedOn = false, speed = 32, flyOn = false, flySpeed = 60, jumpOn = false, jump = 90, noclip = false,
-	infJump = false, airOn = false, clickTP = false, fov = 70 }
+local S = { 
+	speedOn = false, speed = 32, 
+	flyOn = false, flySpeed = 60, 
+	jumpOn = false, jump = 90, 
+	noclip = false, infJump = false, 
+	airOn = false, clickTP = false, 
+	fov = 70,
+	aimOn = false, aimFov = 120, aimSmooth = 50, aimPart = "Head" 
+}
+
+-- FOV: kendi değerimizi uygular, başka script değiştirirse anında geri yazar
+local fovConn
+local function applyFov()
+	local c = workspace.CurrentCamera
+	if not c then return end
+	local v = math.clamp(S.fov, 40, 120)
+	if c.FieldOfView ~= v then c.FieldOfView = v end
+end
+local function hookCamera()
+	cam = workspace.CurrentCamera
+	if fovConn then fovConn:Disconnect() fovConn = nil end
+	if cam then
+		fovConn = cam:GetPropertyChangedSignal("FieldOfView"):Connect(applyFov)
+	end
+	applyFov()
+end
+workspace:GetPropertyChangedSignal("CurrentCamera"):Connect(hookCamera)
+hookCamera()
+RS:BindToRenderStep("RuzgarFOV", Enum.RenderPriority.Last.Value, applyFov)
+
 local up, down = false, false
+local aimHeld = false
+local flyBV, flyBG
+local HUGE = Vector3.new(math.huge, math.huge, math.huge)
 local PUR, BG, PAN, OFF = Color3.fromRGB(150, 100, 255), Color3.fromRGB(18, 16, 26), Color3.fromRGB(30, 27, 44), Color3.fromRGB(46, 42, 64)
 local CYAN, MAG, WHITE = Color3.fromRGB(100, 220, 255), Color3.fromRGB(255, 60, 170), Color3.new(1, 1, 1)
 local GRAY = Color3.fromRGB(150, 150, 170)
@@ -45,7 +73,60 @@ local function snd(id, vol, speed)
 	return ok and s or nil
 end
 
+local function worldToScreen(pos)
+	local sp, onScreen = cam:WorldToViewportPoint(pos)
+	return Vector2.new(sp.X, sp.Y), onScreen, sp.Z
+end
+
+-- Hedef arama noktası: PC'de fare, telefonda ekranın ortası
+local function aimRef()
+	if UIS.MouseEnabled then
+		return UIS:GetMouseLocation()
+	end
+	local vs = cam.ViewportSize
+	return Vector2.new(vs.X / 2, vs.Y / 2)
+end
+
+local function getClosestPlayer()
+	local ref = aimRef()
+	local closest, shortest = nil, S.aimFov
+	for _, p in ipairs(Players:GetPlayers()) do
+		if p ~= lp and p.Character then
+			local hum = p.Character:FindFirstChildOfClass("Humanoid")
+			local part = p.Character:FindFirstChild(S.aimPart)
+			if not part and S.aimPart == "UpperTorso" then
+				part = p.Character:FindFirstChild("Torso") -- R6 karakterler için
+			end
+			if hum and hum.Health > 0 and part then
+				local screenPos, onScreen, depth = worldToScreen(part.Position)
+				if onScreen and depth > 0 then
+					local dist = (ref - screenPos).Magnitude
+					if dist < shortest then
+						shortest = dist
+						closest = part
+					end
+				end
+			end
+		end
+	end
+	return closest
+end
+
 local pg = lp:WaitForChild("PlayerGui")
+
+-- FOV Çemberi için ScreenGui
+local fovGui = new("ScreenGui", { Name = "RuzgarFovGui", ResetOnSpawn = false, IgnoreGuiInset = true }, pg)
+
+local aimFovCircle = new("Frame", {
+	AnchorPoint = Vector2.new(.5, .5),
+	Size = UDim2.new(0, S.aimFov * 2, 0, S.aimFov * 2),
+	Position = UDim2.new(.5, 0, .5, 0),
+	BackgroundTransparency = 1,
+	BorderSizePixel = 0,
+	Visible = false,
+}, fovGui)
+new("UICorner", { CornerRadius = UDim.new(1, 0) }, aimFovCircle)
+new("UIStroke", { Color = Color3.fromRGB(255, 255, 255), Thickness = 2, Transparency = 0.3 }, aimFovCircle)
 
 -- ================= MENÜ =================
 local gui = new("ScreenGui", { Name = "RuzgarMenu", ResetOnSpawn = false }, pg)
@@ -83,7 +164,6 @@ local function page(name)
 	return p
 end
 
--- Kart: kendi başlığı olan gruplama kutusu
 local function card(parent, title)
 	local f = new("Frame", { Size = UDim2.new(1, 0, 0, 0), AutomaticSize = Enum.AutomaticSize.Y, BackgroundColor3 = BG, BorderSizePixel = 0 }, parent)
 	new("UIPadding", { PaddingTop = UDim.new(0, 8), PaddingBottom = UDim.new(0, 8), PaddingLeft = UDim.new(0, 8), PaddingRight = UDim.new(0, 8) }, f)
@@ -94,7 +174,6 @@ local function card(parent, title)
 	return f
 end
 
--- Üst ortada küçük tuşlar
 local dock = new("Frame", { Size = UDim2.new(0, 0, 0, 34), AutomaticSize = Enum.AutomaticSize.X, AnchorPoint = Vector2.new(.5, 0),
 	Position = UDim2.new(.5, 0, 0, 8), BackgroundColor3 = BG, BackgroundTransparency = .2, BorderSizePixel = 0, Active = true }, gui)
 round(dock, 10)
@@ -137,8 +216,8 @@ local function toggle(parent, text, cb, btn)
 	return set
 end
 
-local function slider(parent, text, min, max, key)
-	local h = new("Frame", { Size = UDim2.new(1, 0, 0, 50), BackgroundColor3 = PAN, BorderSizePixel = 0 }, parent)
+local function slider(parent, text, min, max, key, onChange)
+	local h = new("Frame", { Size = UDim2.new(1, 0, 0, 50), BackgroundColor3 = PAN, BorderSizePixel = 0, Active = true }, parent)
 	round(h, 6)
 	txt(h, text, UDim2.new(.6, 0, 0, 24), UDim2.new(0, 10, 0, 4))
 	local val = txt(h, tostring(S[key]), UDim2.new(.3, 0, 0, 24), UDim2.new(.7, -10, 0, 4), true)
@@ -152,6 +231,7 @@ local function slider(parent, text, min, max, key)
 		S[key] = math.floor(min + (max - min) * a + .5)
 		fill.Size = UDim2.new(a, 0, 1, 0)
 		val.Text = tostring(S[key])
+		if onChange then onChange(S[key]) end
 	end
 	local drag = false
 	h.InputBegan:Connect(function(i) if isPress(i) then drag = true; setX(i.Position.X) end end)
@@ -159,7 +239,7 @@ local function slider(parent, text, min, max, key)
 	UIS.InputEnded:Connect(function(i) if isPress(i) then drag = false end end)
 end
 
-local mobUp, mobDown
+local mobUp, mobDown, mobAim
 if mobile then
 	local function mk(text, y, setter)
 		local b = new("TextButton", { Size = UDim2.new(0, 80, 0, 80), Position = UDim2.new(1, -100, 1, y), BackgroundColor3 = PUR, Text = text, TextSize = 28, TextColor3 = WHITE, Visible = false }, gui)
@@ -170,6 +250,23 @@ if mobile then
 	end
 	mobUp = mk("▲", -330, function(v) up = v end)
 	mobDown = mk("▼", -240, function(v) down = v end)
+
+	-- Mobil AIM tuşu: basılı tuttukça kilitlenir (PC'deki sağ tık gibi)
+	mobAim = new("TextButton", { Size = UDim2.new(0, 80, 0, 80), Position = UDim2.new(1, -200, 1, -285), BackgroundColor3 = MAG,
+		Text = "AIM", Font = Enum.Font.GothamBold, TextSize = 20, TextColor3 = WHITE, Visible = false }, gui)
+	round(mobAim, 40)
+	mobAim.InputBegan:Connect(function(i)
+		if i.UserInputType == Enum.UserInputType.Touch then
+			aimHeld = true
+			mobAim.BackgroundColor3 = CYAN
+		end
+	end)
+	mobAim.InputEnded:Connect(function(i)
+		if i.UserInputType == Enum.UserInputType.Touch then
+			aimHeld = false
+			mobAim.BackgroundColor3 = MAG
+		end
+	end)
 end
 local function refreshMobButtons()
 	if mobUp then
@@ -190,12 +287,26 @@ local speedSet = toggle(cSpeed, "Hız (H)", function(v)
 end, shortcut("HIZ"))
 slider(cSpeed, "Hız değeri", 16, 200, "speed")
 
+-- ===== UÇMA (BodyVelocity + BodyGyro) =====
 local cFly = card(mv, "UÇMA")
+
+local function stopFlyBody()
+	if flyBV then flyBV:Destroy() flyBV = nil end
+	if flyBG then flyBG:Destroy() flyBG = nil end
+end
+
 local flySet = toggle(cFly, "Uçma (F)", function(v)
-	local hum = parts()
-	if v and not hum then return end
+	local hum, root = parts()
+	if v and (not hum or not root) then return end
 	S.flyOn = v
-	if hum then hum.PlatformStand = v end
+	stopFlyBody()
+	if v then
+		hum.PlatformStand = true
+		flyBV = new("BodyVelocity", { MaxForce = HUGE, Velocity = Vector3.zero }, root)
+		flyBG = new("BodyGyro", { MaxTorque = HUGE, P = 1e4, D = 500, CFrame = root.CFrame }, root)
+	elseif hum then
+		hum.PlatformStand = false
+	end
 	refreshMobButtons()
 end, shortcut("UÇ"))
 slider(cFly, "Uçma hızı", 20, 200, "flySpeed")
@@ -205,7 +316,6 @@ toggle(cJump, "Zıplama gücü aktif", function(v) S.jumpOn = v end)
 slider(cJump, "Zıplama gücü", 50, 300, "jump")
 local infJumpSet = toggle(cJump, "Sonsuz zıplama (J)", function(v) S.infJump = v end, shortcut("SONSUZ"))
 
--- Hava yürüme: ayağının altında seninle gelen zemin
 local airPlat, airY
 local airSet = toggle(card(mv, "HAVADA YÜRÜME"), "Hava yürüme (K)  |  Space/Ctrl: yukarı/aşağı", function(v)
 	S.airOn = v
@@ -227,14 +337,13 @@ local airSet = toggle(card(mv, "HAVADA YÜRÜME"), "Hava yürüme (K)  |  Space/
 	refreshMobButtons()
 end, shortcut("HAVA"))
 
--- Tıkla ışınlan
 local cTP = card(mv, "TIKLA IŞINLAN")
 local tpSet = toggle(cTP, "Tıkla ışınlan (T)  |  tıkladığın yere git", function(v) S.clickTP = v end, shortcut("TP"))
 
 local cOther = card(mv, "DİĞER")
 local noclipSet = toggle(cOther, "Noclip (G)", function(v) S.noclip = v end, shortcut("NOCLIP"))
 
--- ===== OYUNCULAR SEKMESİ (ışınlan + izle) =====
+-- ===== OYUNCULAR SEKMESİ =====
 local watching = nil
 local function stopWatch()
 	watching = nil
@@ -242,9 +351,8 @@ local function stopWatch()
 	if hum then cam.CameraSubject = hum end
 end
 
-local okP, errP = pcall(function()
+pcall(function()
 	local pl = page("Oyuncular")
-
 	local cWatch = card(pl, "İZLEME")
 	local stopBtn = new("TextButton", { Size = UDim2.new(1, 0, 0, 32), BackgroundColor3 = PUR, Text = "İzlemeyi bırak",
 		Font = Enum.Font.GothamBold, TextSize = 14, TextColor3 = WHITE, BorderSizePixel = 0 }, cWatch)
@@ -302,33 +410,29 @@ local okP, errP = pcall(function()
 	end)
 	refresh()
 
-	-- İzlenen oyuncu yeniden doğarsa kamera takip etsin
 	RS.RenderStepped:Connect(function()
 		if not watching then return end
 		local hum = watching.Character and watching.Character:FindFirstChildOfClass("Humanoid")
 		if hum and cam.CameraSubject ~= hum then cam.CameraSubject = hum end
 	end)
 
-	-- Kendimiz yeniden doğunca izleme biter
 	lp.CharacterAdded:Connect(function()
 		task.wait(.2)
 		stopWatch()
 	end)
 end)
-if not okP then warn("[ruzgarzorx oyuncular] HATA:", errP) end
 
 -- ===== AYARLAR SEKMESİ =====
-local okS, errS = pcall(function()
+pcall(function()
 	local st = page("Ayarlar")
 
 	local cFov = card(st, "GÖRÜŞ")
-	slider(cFov, "Görüş açısı (FOV)", 40, 120, "fov")
+	slider(cFov, "Görüş açısı (FOV)", 40, 120, "fov", applyFov)
 
 	local cTheme = card(st, "TEMA")
 	local themeRow = new("Frame", { Size = UDim2.new(1, 0, 0, 36), BackgroundColor3 = PAN, BorderSizePixel = 0 }, cTheme)
 	round(themeRow, 6)
-	new("UIListLayout", { FillDirection = Enum.FillDirection.Horizontal, Padding = UDim.new(0, 8),
-		VerticalAlignment = Enum.VerticalAlignment.Center, SortOrder = Enum.SortOrder.LayoutOrder }, themeRow)
+	new("UIListLayout", { FillDirection = Enum.FillDirection.Horizontal, Padding = UDim.new(0, 8), VerticalAlignment = Enum.VerticalAlignment.Center, SortOrder = Enum.SortOrder.LayoutOrder }, themeRow)
 	new("UIPadding", { PaddingLeft = UDim.new(0, 8) }, themeRow)
 
 	local function applyTheme(newColor)
@@ -353,13 +457,12 @@ local okS, errS = pcall(function()
 		local b = new("TextButton", { Size = UDim2.new(0, 26, 0, 26), BackgroundColor3 = c, Text = "", BorderSizePixel = 0 }, themeRow)
 		round(b, 13)
 		b.Activated:Connect(function()
-			if rainbowOn then PUR = c return end -- rainbow açıkken sadece temel rengi sakla
+			if rainbowOn then PUR = c return end
 			applyTheme(c)
 			snd("rbxasset://sounds/switch.wav", .3, 1.1)
 		end)
 	end
 
-	-- Rainbow
 	local stroke = new("UIStroke", { Thickness = 2, Color = PUR, Enabled = false }, main)
 	toggle(cTheme, "Rainbow menü", function(v)
 		rainbowOn = v
@@ -383,13 +486,46 @@ local okS, errS = pcall(function()
 	cr.TextColor3 = PUR
 	cr.TextSize = 16
 end)
-if not okS then warn("[ruzgarzorx ayarlar] HATA:", errS) end
 
--- FOV: Roblox kamera scriptinden SONRA çalışır, üstüne yazılmaz
-RS:BindToRenderStep("RuzgarFOV", Enum.RenderPriority.Camera.Value + 1, function()
-	local c = workspace.CurrentCamera
-	if c then c.FieldOfView = math.clamp(S.fov, 40, 120) end
+-- ===== AIMLOCK SEKMESİ =====
+local okA, errA = pcall(function()
+	local ap = page("Aimlock")
+
+	local cAim = card(ap, "AIMLOCK")
+	toggle(cAim, "Aimlock (PC: Sağ Tık | Mobil: AIM tuşu)", function(v)
+		S.aimOn = v
+		aimFovCircle.Visible = v
+		if mobAim then mobAim.Visible = v end
+		if not v then aimHeld = false end
+	end, shortcut("AIM"))
+
+	-- Slider sadece boyutu değiştirir, konumu takip döngüsü belirler
+	slider(cAim, "Aimlock FOV", 50, 500, "aimFov", function(v)
+		aimFovCircle.Size = UDim2.new(0, v * 2, 0, v * 2)
+	end)
+
+	slider(cAim, "Yumuşaklık (Smooth)", 0, 100, "aimSmooth")
+
+	local cPart = card(ap, "HEDEF NOKTASI")
+	local aimPartButtons = {}
+	local function setPart(partName)
+		S.aimPart = partName
+		for _, b in ipairs(aimPartButtons) do
+			b.BackgroundColor3 = (b.Name == partName) and PUR or PAN
+		end
+	end
+	local aimPartsRow = new("Frame", { Size = UDim2.new(1, 0, 0, 36), BackgroundTransparency = 1 }, cPart)
+	new("UIListLayout", { FillDirection = Enum.FillDirection.Horizontal, Padding = UDim.new(0, 6), SortOrder = Enum.SortOrder.LayoutOrder }, aimPartsRow)
+	for _, pName in ipairs({ "Head", "HumanoidRootPart", "UpperTorso" }) do
+		local b = new("TextButton", { Size = UDim2.new(0, 100, 0, 30), BackgroundColor3 = PAN, Text = pName, Font = Enum.Font.GothamBold,
+			TextSize = 12, TextColor3 = WHITE, BorderSizePixel = 0, Name = pName }, aimPartsRow)
+		round(b, 6)
+		b.Activated:Connect(function() setPart(pName) end)
+		table.insert(aimPartButtons, b)
+	end
+	setPart("Head")
 end)
+if not okA then warn("[ruzgarzorx aimlock] HATA:", errA) end
 
 tabs["Hareket"].BackgroundColor3 = PUR
 pages["Hareket"].Visible = true
@@ -421,7 +557,6 @@ lp.CharacterAdded:Connect(function()
 	airSet(false)
 end)
 
--- Tıkla ışınlan (PC: sol tık, telefon: ekrana dokunma)
 local function tpTo(x, y)
 	local c = workspace.CurrentCamera
 	local _, root = parts()
@@ -437,7 +572,7 @@ local function tpTo(x, y)
 	if res then
 		root.CFrame = CFrame.new(res.Position + Vector3.new(0, 4, 0)) * root.CFrame.Rotation
 		root.AssemblyLinearVelocity = Vector3.zero
-		if S.airOn and airPlat then airY = res.Position.Y - .5 + 0 end
+		if S.airOn and airPlat then airY = res.Position.Y - .5 end
 	end
 end
 UIS.InputBegan:Connect(function(i, p)
@@ -451,14 +586,12 @@ UIS.TouchTap:Connect(function(pos, p)
 	tpTo(pos[1].X, pos[1].Y)
 end)
 
--- Sonsuz zıplama: havadayken zıplama isteği gelince tekrar zıplatır (PC ve telefon)
 UIS.JumpRequest:Connect(function()
 	if not S.infJump or S.flyOn then return end
 	local hum = parts()
 	if hum then hum:ChangeState(Enum.HumanoidStateType.Jumping) end
 end)
 
--- Noclip
 RS.Stepped:Connect(function()
 	if not S.noclip or not lp.Character then return end
 	for _, p in lp.Character:GetDescendants() do
@@ -466,7 +599,6 @@ RS.Stepped:Connect(function()
 	end
 end)
 
--- Hava yürüme zemini: X/Z'de seninle gelir, Y'yi Space/Ctrl ile değiştirirsin
 RS.RenderStepped:Connect(function(dt)
 	if not S.airOn or not airPlat or not airY then return end
 	local hum, root = parts()
@@ -484,28 +616,76 @@ RS.RenderStepped:Connect(function()
 	if S.jumpOn then hum.UseJumpPower = true; hum.JumpPower = S.jump end
 	if not S.flyOn then return end
 
-	local look = cam.CFrame.LookVector
-	local flat = Vector3.new(look.X, 0, look.Z)
-	local dir = hum.MoveDirection
-	local moving = dir.Magnitude > 0
-	if moving and flat.Magnitude > .01 then dir += Vector3.yAxis * (dir:Dot(flat.Unit) * look.Y / flat.Magnitude) end
-	if UIS:IsKeyDown(Enum.KeyCode.Space) or up then dir += Vector3.yAxis end
-	if UIS:IsKeyDown(Enum.KeyCode.LeftControl) or down then dir -= Vector3.yAxis end
-	root.AssemblyLinearVelocity = dir.Magnitude > 0 and dir.Unit * S.flySpeed or Vector3.zero
-
-	local pos = root.Position
-	local target
-	if moving and flat.Magnitude > .01 then
-		target = CFrame.lookAt(pos, pos + look) * CFrame.Angles(math.rad(-90), 0, 0)
-	elseif flat.Magnitude > .01 then
-		target = CFrame.lookAt(pos, pos + flat)
+	-- Ölünce uçmayı kapat
+	if hum.Health <= 0 then
+		flySet(false)
+		return
 	end
-	if target then root.CFrame = root.CFrame:Lerp(target, .2) end
+	if not flyBV or not flyBG or flyBV.Parent ~= root then return end
+
+	hum.PlatformStand = true
+	local cf = cam.CFrame
+	local dir = Vector3.zero
+	local typing = UIS:GetFocusedTextBox() ~= nil
+
+	-- PC: WASD (bir kutuya yazarken çalışmaz)
+	if not typing then
+		if UIS:IsKeyDown(Enum.KeyCode.W) then dir += cf.LookVector end
+		if UIS:IsKeyDown(Enum.KeyCode.S) then dir -= cf.LookVector end
+		if UIS:IsKeyDown(Enum.KeyCode.D) then dir += cf.RightVector end
+		if UIS:IsKeyDown(Enum.KeyCode.A) then dir -= cf.RightVector end
+	end
+
+	-- Telefon / gamepad: joystick (kameranın baktığı yöne göre eğimli gider)
+	if dir.Magnitude == 0 and hum.MoveDirection.Magnitude > 0 then
+		dir = hum.MoveDirection
+		local look = cf.LookVector
+		local flat = Vector3.new(look.X, 0, look.Z)
+		if flat.Magnitude > .01 then
+			dir += Vector3.yAxis * (dir:Dot(flat.Unit) * look.Y / flat.Magnitude)
+		end
+	end
+
+	-- Yukarı / aşağı
+	if not typing then
+		if UIS:IsKeyDown(Enum.KeyCode.Space) then dir += Vector3.yAxis end
+		if UIS:IsKeyDown(Enum.KeyCode.LeftControl) or UIS:IsKeyDown(Enum.KeyCode.LeftShift) then dir -= Vector3.yAxis end
+	end
+	if up then dir += Vector3.yAxis end
+	if down then dir -= Vector3.yAxis end
+
+	flyBV.Velocity = dir.Magnitude > 0 and dir.Unit * S.flySpeed or Vector3.zero
+	flyBG.CFrame = cf
+end)
+
+-- Aimlock dairesi: PC'de fareyi takip eder, telefonda ekranın ortasında durur
+RS.RenderStepped:Connect(function()
+	if not S.aimOn then return end
+	local m = aimRef()
+	aimFovCircle.Position = UDim2.fromOffset(m.X, m.Y)
+end)
+
+-- Aimlock döngüsü (kamera scriptinden sonra çalışır, PC + mobil)
+RS:BindToRenderStep("RuzgarAim", Enum.RenderPriority.Camera.Value + 1, function()
+	if not S.aimOn then return end
+	local holding = aimHeld or UIS:IsMouseButtonPressed(Enum.UserInputType.MouseButton2)
+	if not holding then return end
+	local targetPart = getClosestPlayer()
+	if targetPart then
+		local camPos = cam.CFrame.Position
+		local desired = CFrame.lookAt(camPos, targetPart.Position)
+		local smooth = math.clamp(S.aimSmooth / 100, 0, 1)
+		if smooth > 0 then
+			cam.CFrame = cam.CFrame:Lerp(desired, smooth)
+		else
+			cam.CFrame = desired
+		end
+	end
 end)
 
 print("[ruzgarzorx] menu hazir")
 
--- ================= AÇILIŞ ANİMASYONU (dönen yıldız) =================
+-- AÇILIŞ ANİMASYONU
 task.spawn(function()
 	local g, blur
 	local audio = {}
