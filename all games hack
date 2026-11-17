@@ -12,7 +12,8 @@ local S = {
 	noclip = false, infJump = false, 
 	airOn = false, clickTP = false, 
 	fov = 70,
-	aimOn = false, aimFov = 120, aimSmooth = 50, aimPart = "Head" 
+	aimOn = false, aimFov = 120, aimSmooth = 50, aimPart = "Head",
+	espOn = false, espBoxOnly = false, espTeam = false
 }
 
 -- FOV: kendi değerimizi uygular, başka script değiştirirse anında geri yazar
@@ -526,6 +527,116 @@ local okA, errA = pcall(function()
 	setPart("Head")
 end)
 if not okA then warn("[ruzgarzorx aimlock] HATA:", errA) end
+
+-- ===== ESP =====
+local espFolder = new("Folder", { Name = "RuzgarESP" }, pg)
+local espObjs = {}
+local RED, GREEN = Color3.fromRGB(255, 60, 60), Color3.fromRGB(80, 255, 120)
+
+local function removeEsp(p)
+	local e = espObjs[p]
+	if e then
+		if e.hl then e.hl:Destroy() end
+		if e.bb then e.bb:Destroy() end
+		espObjs[p] = nil
+	end
+end
+
+local function makeEsp(p)
+	removeEsp(p)
+	local char = p.Character
+	if not char then return end
+	local head = char:FindFirstChild("Head") or char:FindFirstChild("HumanoidRootPart")
+	if not head then return end
+
+	-- Duvar arkasından görünen çerçeve (karakterin içine konur, ölünce kendiliğinden gider)
+	local hl = new("Highlight", {
+		Name = "RuzgarHL", Adornee = char,
+		FillColor = MAG, FillTransparency = .65,
+		OutlineColor = WHITE, OutlineTransparency = 0,
+		DepthMode = Enum.HighlightDepthMode.AlwaysOnTop,
+	}, char)
+
+	-- İsim / mesafe / can yazısı
+	local bb = new("BillboardGui", {
+		Name = "RuzgarBB", Adornee = head, AlwaysOnTop = true,
+		Size = UDim2.new(0, 140, 0, 36), StudsOffset = Vector3.new(0, 2.6, 0),
+	}, espFolder)
+	local lbl = new("TextLabel", {
+		Size = UDim2.new(1, 0, 1, 0), BackgroundTransparency = 1,
+		Font = Enum.Font.GothamBold, TextSize = 13, TextColor3 = WHITE,
+		TextStrokeTransparency = 0, Text = p.DisplayName,
+	}, bb)
+
+	espObjs[p] = { hl = hl, bb = bb, lbl = lbl }
+end
+
+local function clearEsp()
+	for p in pairs(espObjs) do removeEsp(p) end
+end
+
+local function buildAllEsp()
+	for _, p in Players:GetPlayers() do
+		if p ~= lp then makeEsp(p) end
+	end
+end
+
+local function hookEspPlayer(p)
+	if p == lp then return end
+	p.CharacterAdded:Connect(function()
+		if S.espOn then
+			task.wait(.3)
+			if S.espOn then makeEsp(p) end
+		end
+	end)
+end
+for _, p in Players:GetPlayers() do hookEspPlayer(p) end
+Players.PlayerAdded:Connect(function(p)
+	hookEspPlayer(p)
+	if S.espOn then
+		task.wait(1)
+		if S.espOn and p.Character then makeEsp(p) end
+	end
+end)
+Players.PlayerRemoving:Connect(removeEsp)
+
+-- Yazıları ve görünürlüğü 0.1 sn'de bir günceller
+local espAcc = 0
+RS.RenderStepped:Connect(function(dt)
+	if not S.espOn then return end
+	espAcc += dt
+	if espAcc < .1 then return end
+	espAcc = 0
+	local _, myRoot = parts()
+	for p, e in pairs(espObjs) do
+		local char = p.Character
+		local hum = char and char:FindFirstChildOfClass("Humanoid")
+		local root = char and char:FindFirstChild("HumanoidRootPart")
+		if hum and root then
+			local hide = S.espTeam and p.Team ~= nil and p.Team == lp.Team
+			e.hl.Enabled = not hide
+			e.bb.Enabled = not hide and not S.espBoxOnly
+			local dist = myRoot and math.floor((myRoot.Position - root.Position).Magnitude) or 0
+			local hp = math.max(0, math.floor(hum.Health))
+			local frac = hum.MaxHealth > 0 and math.clamp(hum.Health / hum.MaxHealth, 0, 1) or 0
+			e.lbl.Text = p.DisplayName .. "\n" .. dist .. "m | " .. hp .. " HP"
+			e.lbl.TextColor3 = RED:Lerp(GREEN, frac)
+		end
+	end
+end)
+
+local espSet
+local okE, errE = pcall(function()
+	local ep = page("ESP")
+	local cEsp = card(ep, "ESP")
+	espSet = toggle(cEsp, "ESP aktif (duvar arkası çerçeve + isim)", function(v)
+		S.espOn = v
+		if v then buildAllEsp() else clearEsp() end
+	end, shortcut("ESP"))
+	toggle(cEsp, "Sadece çerçeve (isim/can gizle)", function(v) S.espBoxOnly = v end)
+	toggle(cEsp, "Takım arkadaşlarını gizle", function(v) S.espTeam = v end)
+end)
+if not okE then warn("[ruzgarzorx esp] HATA:", errE) end
 
 tabs["Hareket"].BackgroundColor3 = PUR
 pages["Hareket"].Visible = true
