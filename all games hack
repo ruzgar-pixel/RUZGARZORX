@@ -2,7 +2,9 @@ print("[ruzgarzorx] script basladi")
 
 local Players, UIS, RS, TS = game:GetService("Players"), game:GetService("UserInputService"), game:GetService("RunService"), game:GetService("TweenService")
 local SoundService, Lighting = game:GetService("SoundService"), game:GetService("Lighting")
-local lp, mobile = Players.LocalPlayer, UIS.TouchEnabled
+local lp = Players.LocalPlayer
+-- Daha güvenilir mobil tespiti: dokunmatik + klavye/fare yoksa mobil kabul et
+local mobile = UIS.TouchEnabled and not UIS.KeyboardEnabled and not UIS.MouseEnabled
 local cam = workspace.CurrentCamera
 
 local S = { 
@@ -13,7 +15,9 @@ local S = {
 	airOn = false, clickTP = false, 
 	fov = 70,
 	aimOn = false, aimFov = 120, aimSmooth = 50, aimPart = "Head",
-	espOn = false, espBoxOnly = false, espTeam = false
+	espOn = false, espBoxOnly = false, espTeam = false,
+	antiFling = false,
+	flingOn = false, flingPower = 50000, flingMs = 450
 }
 
 -- FOV: kendi değerimizi uygular, başka script değiştirirse anında geri yazar
@@ -39,6 +43,7 @@ RS:BindToRenderStep("RuzgarFOV", Enum.RenderPriority.Last.Value, applyFov)
 local up, down = false, false
 local aimHeld = false
 local flyBV, flyBG
+local lastSafe
 local HUGE = Vector3.new(math.huge, math.huge, math.huge)
 local PUR, BG, PAN, OFF = Color3.fromRGB(150, 100, 255), Color3.fromRGB(18, 16, 26), Color3.fromRGB(30, 27, 44), Color3.fromRGB(46, 42, 64)
 local CYAN, MAG, WHITE = Color3.fromRGB(100, 220, 255), Color3.fromRGB(255, 60, 170), Color3.new(1, 1, 1)
@@ -88,9 +93,9 @@ local function aimRef()
 	return Vector2.new(vs.X / 2, vs.Y / 2)
 end
 
-local function getClosestPlayer()
+local function getClosestPlayer(maxDist)
 	local ref = aimRef()
-	local closest, shortest = nil, S.aimFov
+	local closest, shortest = nil, maxDist or S.aimFov
 	for _, p in ipairs(Players:GetPlayers()) do
 		if p ~= lp and p.Character then
 			local hum = p.Character:FindFirstChildOfClass("Humanoid")
@@ -139,7 +144,7 @@ round(bar, 10)
 local titleLbl = txt(bar, "ruzgarzorx", UDim2.new(0, 200, 1, 0), UDim2.new(0, 14, 0, 0), true)
 titleLbl.TextColor3 = PUR
 titleLbl.TextSize = 17
-local keys = txt(bar, "RCtrl menü | F uç | G noclip | H hız | J sonsuz | K hava | T tıkla-TP", UDim2.new(0, 400, 1, 0), UDim2.new(1, -410, 0, 0))
+local keys = txt(bar, "RCtrl menü | F uç | G noclip | H hız | J sonsuz | K hava | T tp | V fling", UDim2.new(0, 440, 1, 0), UDim2.new(1, -448, 0, 0))
 keys.TextSize, keys.TextXAlignment, keys.TextColor3, keys.Visible = 11, Enum.TextXAlignment.Right, GRAY, not mobile
 local side = new("Frame", { Size = UDim2.new(0, 120, 1, -54), Position = UDim2.new(0, 8, 0, 46), BackgroundTransparency = 1 }, main)
 new("UIListLayout", { Padding = UDim.new(0, 6), SortOrder = Enum.SortOrder.LayoutOrder }, side)
@@ -189,11 +194,36 @@ local function shortcut(text)
 	return b
 end
 
+-- Menü açma/kapama animasyonu + sesi
+local menuScale = new("UIScale", { Scale = 1 }, main)
+local menuBusy = false
+local introBusy = true -- intro bitene kadar MENÜ tuşu çalışmaz
+local function setMenu(show)
+	if menuBusy or introBusy or main.Visible == show then return end
+	menuBusy = true
+	if show then
+		menuScale.Scale = .6
+		main.Visible = true
+		snd("rbxasset://sounds/electronicpingshort.wav", .5, 1.4)
+		snd("rbxasset://sounds/bass.wav", .25, 1.6)
+		local t = TS:Create(menuScale, TweenInfo.new(.35, Enum.EasingStyle.Back, Enum.EasingDirection.Out), { Scale = 1 })
+		t:Play()
+		t.Completed:Wait()
+	else
+		snd("rbxasset://sounds/electronicpingshort.wav", .4, .8)
+		local t = TS:Create(menuScale, TweenInfo.new(.22, Enum.EasingStyle.Quad, Enum.EasingDirection.In), { Scale = .6 })
+		t:Play()
+		t.Completed:Wait()
+		main.Visible = false
+		menuScale.Scale = 1
+	end
+	menuBusy = false
+end
+
 local menuBtn = shortcut("MENÜ")
 menuBtn.BackgroundColor3 = PUR
 menuBtn.Activated:Connect(function()
-	snd("rbxasset://sounds/switch.wav", .4, 1)
-	main.Visible = not main.Visible
+	setMenu(not main.Visible)
 end)
 
 local function toggle(parent, text, cb, btn)
@@ -343,6 +373,145 @@ local tpSet = toggle(cTP, "Tıkla ışınlan (T)  |  tıkladığın yere git", f
 
 local cOther = card(mv, "DİĞER")
 local noclipSet = toggle(cOther, "Noclip (G)", function(v) S.noclip = v end, shortcut("NOCLIP"))
+local antiSet = toggle(cOther, "Anti-fling (seni fırlatamasınlar)", function(v)
+	S.antiFling = v
+	lastSafe = nil
+end, shortcut("ANTİ"))
+
+-- ===== FLING =====
+-- Çarpışma + açısal hız. Anti-fling ve noclip bu sırada karışmaz.
+local flinging = false
+local FLING_COL = Color3.fromRGB(255, 64, 84)
+
+local function closestByDistance()
+	local _, myRoot = parts()
+	if not myRoot then return nil end
+	local best, bestD = nil, math.huge
+	for _, plr in ipairs(Players:GetPlayers()) do
+		if plr ~= lp and plr.Character then
+			local r = plr.Character:FindFirstChild("HumanoidRootPart")
+			local h = plr.Character:FindFirstChildOfClass("Humanoid")
+			if r and h and h.Health > 0 then
+				local d = (r.Position - myRoot.Position).Magnitude
+				if d < bestD then bestD, best = d, plr end
+			end
+		end
+	end
+	return best
+end
+
+local function playerOfPart(part)
+	if not part then return nil end
+	local model = part.Parent
+	if model and model:IsA("Model") then
+		local plr = Players:GetPlayerFromCharacter(model)
+		if plr then return plr end
+	end
+	model = part:FindFirstAncestorOfClass("Model")
+	return model and Players:GetPlayerFromCharacter(model) or nil
+end
+
+local function flingOnce(target)
+	local myHum, myRoot = parts()
+	local char = target and target.Character
+	local tRoot = char and char:FindFirstChild("HumanoidRootPart")
+	local tHum = char and char:FindFirstChildOfClass("Humanoid")
+	if not myHum or not myRoot or not tRoot or not tHum then return false end
+	if myHum.Health <= 0 or tHum.Health <= 0 then return false end
+	local wasFly = S.flyOn
+	if wasFly then stopFlyBody() end
+	local origin = myRoot.CFrame
+	local pwr = math.clamp(S.flingPower or 50000, 1000, 500000)
+	local dur = math.clamp((S.flingMs or 450) / 1000, 0.15, 1.2)
+	myHum.Sit = false
+	myHum.PlatformStand = true
+	pcall(function() myHum:ChangeState(Enum.HumanoidStateType.Physics) end)
+	myRoot.Anchored = false
+	for _, part in char:GetDescendants() do
+		if part:IsA("BasePart") then part.CanCollide = true end
+	end
+	local bv
+	pcall(function()
+		bv = new("BodyAngularVelocity", {
+			MaxTorque = HUGE,
+			AngularVelocity = Vector3.new(pwr, pwr, pwr),
+			P = 1e6,
+		}, myRoot)
+	end)
+	snd("rbxasset://sounds/bass.wav", .5, .5)
+	local t0 = os.clock()
+	while os.clock() - t0 < dur do
+		if not myRoot.Parent or not tRoot.Parent or tHum.Health <= 0 then break end
+		local me = lp.Character
+		if me then
+			for _, part in me:GetDescendants() do
+				if part:IsA("BasePart") then
+					part.CanCollide = true
+					part.Massless = false
+				end
+			end
+		end
+		myRoot.CFrame = tRoot.CFrame * CFrame.new(0, 0.15, 0) * CFrame.Angles(math.rad(90), 0, 0)
+		local vel = Vector3.new((math.random() * 2 - 1) * pwr, pwr, (math.random() * 2 - 1) * pwr)
+		local spin = Vector3.new(pwr, pwr, pwr)
+		myRoot.AssemblyLinearVelocity = vel
+		myRoot.AssemblyAngularVelocity = spin
+		pcall(function()
+			myRoot.Velocity = vel
+			myRoot.RotVelocity = spin
+		end)
+		RS.Heartbeat:Wait()
+	end
+	if bv and bv.Parent then bv:Destroy() end
+	if myRoot.Parent then
+		myRoot.AssemblyLinearVelocity = Vector3.zero
+		myRoot.AssemblyAngularVelocity = Vector3.zero
+		pcall(function()
+			myRoot.Velocity = Vector3.zero
+			myRoot.RotVelocity = Vector3.zero
+		end)
+		myRoot.CFrame = origin
+	end
+	if myHum.Parent and myHum.Health > 0 then
+		myHum.PlatformStand = false
+		pcall(function() myHum:ChangeState(Enum.HumanoidStateType.GettingUp) end)
+		if wasFly then flySet(true) end
+	end
+	return true
+end
+
+local function flingPlayer(target)
+	if flinging or not target or target == lp then return end
+	flinging = true
+	task.spawn(function()
+		local ok, err = pcall(flingOnce, target)
+		if not ok then warn("[ruzgarzorx fling] HATA:", err) end
+		task.wait(0.12)
+		flinging = false
+	end)
+end
+
+local function flingAll()
+	if flinging then return end
+	flinging = true
+	task.spawn(function()
+		local ok, err = pcall(function()
+			for _, plr in ipairs(Players:GetPlayers()) do
+				if plr ~= lp and plr.Character then
+					flingOnce(plr)
+					task.wait(0.15)
+				end
+			end
+		end)
+		if not ok then warn("[ruzgarzorx fling] HATA:", err) end
+		flinging = false
+	end)
+end
+
+local function flingLook()
+	local plr = playerOfPart(getClosestPlayer(1e6)) or closestByDistance()
+	if plr then flingPlayer(plr) end
+end
 
 -- ===== OYUNCULAR SEKMESİ =====
 local watching = nil
@@ -360,13 +529,30 @@ pcall(function()
 	round(stopBtn, 6)
 	stopBtn.Activated:Connect(stopWatch)
 
+	local cFling = card(pl, "FLING")
+	toggle(cFling, "Dokununca fırlat", function(v) S.flingOn = v end, shortcut("FLING"))
+	slider(cFling, "Fling gücü", 10000, 200000, "flingPower")
+	slider(cFling, "Süre (ms)", 200, 1000, "flingMs")
+	local hint = txt(cFling, "Çarpışmayla fırlatır. Anti-cheat'li oyunlarda tutmayabilir.", UDim2.new(1, 0, 0, 28))
+	hint.TextColor3, hint.TextSize, hint.TextWrapped = GRAY, 12, true
+
+	local function flingBtn(parent, text, fn)
+		local b = new("TextButton", { Size = UDim2.new(1, 0, 0, 32), BackgroundColor3 = FLING_COL, Text = text,
+			Font = Enum.Font.GothamBold, TextSize = 14, TextColor3 = WHITE, BorderSizePixel = 0 }, parent)
+		round(b, 6)
+		b.Activated:Connect(fn)
+		return b
+	end
+	flingBtn(cFling, "Baktığını fırlat (V)", flingLook)
+	flingBtn(cFling, "Herkesi fırlat", flingAll)
+
 	local listCard = card(pl, "OYUNCULAR")
 	local empty = txt(listCard, "Sunucuda başka oyuncu yok", UDim2.new(1, 0, 0, 24))
 	empty.TextColor3 = GRAY
 
-	local function mini(parent, text, x)
-		local b = new("TextButton", { Size = UDim2.new(0, 58, 0, 26), Position = UDim2.new(1, x, .5, -13), BackgroundColor3 = PUR,
-			Text = text, Font = Enum.Font.GothamBold, TextSize = 12, TextColor3 = WHITE, BorderSizePixel = 0 }, parent)
+	local function mini(parent, text, x, w)
+		local b = new("TextButton", { Size = UDim2.new(0, w or 58, 0, 26), Position = UDim2.new(1, x, .5, -13), BackgroundColor3 = PUR,
+			Text = text, Font = Enum.Font.GothamBold, TextSize = 11, TextColor3 = WHITE, BorderSizePixel = 0 }, parent)
 		round(b, 6)
 		return b
 	end
@@ -381,17 +567,17 @@ pcall(function()
 				any = true
 				local row = new("Frame", { Name = "Row", Size = UDim2.new(1, 0, 0, 38), BackgroundColor3 = PAN, BorderSizePixel = 0 }, listCard)
 				round(row, 6)
-				local nm = txt(row, p.DisplayName, UDim2.new(1, -140, 1, 0), UDim2.new(0, 10, 0, 0))
+				local nm = txt(row, p.DisplayName, UDim2.new(1, -206, 1, 0), UDim2.new(0, 10, 0, 0))
 				nm.TextTruncate = Enum.TextTruncate.AtEnd
 
-				local tp = mini(row, "Işınlan", -128)
+				local tp = mini(row, "Işınlan", -198, 66)
 				tp.Activated:Connect(function()
 					local target = p.Character and p.Character:FindFirstChild("HumanoidRootPart")
 					local _, me = parts()
 					if target and me then me.CFrame = target.CFrame * CFrame.new(0, 0, 3) end
 				end)
 
-				local wb = mini(row, "İzle", -66)
+				local wb = mini(row, "İzle", -128, 52)
 				wb.Activated:Connect(function()
 					local hum = p.Character and p.Character:FindFirstChildOfClass("Humanoid")
 					if hum then
@@ -400,6 +586,10 @@ pcall(function()
 						cam.CameraSubject = hum
 					end
 				end)
+
+				local fb = mini(row, "Fling", -72, 60)
+				fb.BackgroundColor3 = FLING_COL
+				fb.Activated:Connect(function() flingPlayer(p) end)
 			end
 		end
 		empty.Visible = not any
@@ -500,7 +690,6 @@ local okA, errA = pcall(function()
 		if not v then aimHeld = false end
 	end, shortcut("AIM"))
 
-	-- Slider sadece boyutu değiştirir, konumu takip döngüsü belirler
 	slider(cAim, "Aimlock FOV", 50, 500, "aimFov", function(v)
 		aimFovCircle.Size = UDim2.new(0, v * 2, 0, v * 2)
 	end)
@@ -549,7 +738,6 @@ local function makeEsp(p)
 	local head = char:FindFirstChild("Head") or char:FindFirstChild("HumanoidRootPart")
 	if not head then return end
 
-	-- Duvar arkasından görünen çerçeve (karakterin içine konur, ölünce kendiliğinden gider)
 	local hl = new("Highlight", {
 		Name = "RuzgarHL", Adornee = char,
 		FillColor = MAG, FillTransparency = .65,
@@ -557,7 +745,6 @@ local function makeEsp(p)
 		DepthMode = Enum.HighlightDepthMode.AlwaysOnTop,
 	}, char)
 
-	-- İsim / mesafe / can yazısı
 	local bb = new("BillboardGui", {
 		Name = "RuzgarBB", Adornee = head, AlwaysOnTop = true,
 		Size = UDim2.new(0, 140, 0, 36), StudsOffset = Vector3.new(0, 2.6, 0),
@@ -600,7 +787,6 @@ Players.PlayerAdded:Connect(function(p)
 end)
 Players.PlayerRemoving:Connect(removeEsp)
 
--- Yazıları ve görünürlüğü 0.1 sn'de bir günceller
 local espAcc = 0
 RS.RenderStepped:Connect(function(dt)
 	if not S.espOn then return end
@@ -654,18 +840,20 @@ UIS.InputEnded:Connect(function(i) if isPress(i) then drag = false end end)
 
 -- Klavye kısayolları
 UIS.InputBegan:Connect(function(i, p)
-	if i.KeyCode == Enum.KeyCode.RightControl then main.Visible = not main.Visible end
+	if i.KeyCode == Enum.KeyCode.RightControl then setMenu(not main.Visible) end
 	if p then return end
 	if i.KeyCode == Enum.KeyCode.F then flySet(not S.flyOn)
 	elseif i.KeyCode == Enum.KeyCode.G then noclipSet(not S.noclip)
 	elseif i.KeyCode == Enum.KeyCode.H then speedSet(not S.speedOn)
 	elseif i.KeyCode == Enum.KeyCode.J then infJumpSet(not S.infJump)
 	elseif i.KeyCode == Enum.KeyCode.K then airSet(not S.airOn)
-	elseif i.KeyCode == Enum.KeyCode.T then tpSet(not S.clickTP) end
+	elseif i.KeyCode == Enum.KeyCode.T then tpSet(not S.clickTP)
+	elseif i.KeyCode == Enum.KeyCode.V then flingLook() end
 end)
 lp.CharacterAdded:Connect(function()
 	flySet(false)
 	airSet(false)
+	lastSafe = nil
 end)
 
 local function tpTo(x, y)
@@ -704,14 +892,65 @@ UIS.JumpRequest:Connect(function()
 end)
 
 RS.Stepped:Connect(function()
-	if not S.noclip or not lp.Character then return end
+	if not S.noclip or flinging or not lp.Character then return end
 	for _, p in lp.Character:GetDescendants() do
 		if p:IsA("BasePart") then p.CanCollide = false end
 	end
 end)
 
+-- Anti-fling
+RS.Stepped:Connect(function()
+	if not S.antiFling or flinging then return end
+
+	for _, p in Players:GetPlayers() do
+		if p ~= lp and p.Character then
+			for _, part in p.Character:GetDescendants() do
+				if part:IsA("BasePart") and part.CanCollide then
+					part.CanCollide = false
+				end
+			end
+		end
+	end
+
+	local hum, root = parts()
+	if not hum or not root then return end
+	local lin = root.AssemblyLinearVelocity.Magnitude
+	local ang = root.AssemblyAngularVelocity.Magnitude
+	local linLimit = math.max(500, (S.flyOn and S.flySpeed or 0) * 3, (S.speedOn and S.speed or 0) * 3)
+	local angLimit = S.flyOn and 400 or 120
+
+	if lin > linLimit or ang > angLimit then
+		root.AssemblyLinearVelocity = Vector3.zero
+		root.AssemblyAngularVelocity = Vector3.zero
+		if lastSafe then root.CFrame = lastSafe end
+	elseif lin < 100 and ang < 20 then
+		lastSafe = root.CFrame
+	end
+end)
+
+-- Dokununca fırlat
+local touchCd = {}
+RS.Heartbeat:Connect(function()
+	if not S.flingOn or flinging then return end
+	local _, myRoot = parts()
+	if not myRoot then return end
+	for _, plr in ipairs(Players:GetPlayers()) do
+		if plr ~= lp and plr.Character then
+			local r = plr.Character:FindFirstChild("HumanoidRootPart")
+			local h = plr.Character:FindFirstChildOfClass("Humanoid")
+			if r and h and h.Health > 0 and (r.Position - myRoot.Position).Magnitude <= 6 then
+				if os.clock() - (touchCd[plr] or 0) > 1.6 then
+					touchCd[plr] = os.clock()
+					flingPlayer(plr)
+					return
+				end
+			end
+		end
+	end
+end)
+
 RS.RenderStepped:Connect(function(dt)
-	if not S.airOn or not airPlat or not airY then return end
+	if not S.airOn or flinging or not airPlat or not airY then return end
 	local hum, root = parts()
 	if not hum or not root then return end
 	if UIS:IsKeyDown(Enum.KeyCode.Space) or up or hum.Jump then airY += 25 * dt end
@@ -727,7 +966,6 @@ RS.RenderStepped:Connect(function()
 	if S.jumpOn then hum.UseJumpPower = true; hum.JumpPower = S.jump end
 	if not S.flyOn then return end
 
-	-- Ölünce uçmayı kapat
 	if hum.Health <= 0 then
 		flySet(false)
 		return
@@ -739,7 +977,6 @@ RS.RenderStepped:Connect(function()
 	local dir = Vector3.zero
 	local typing = UIS:GetFocusedTextBox() ~= nil
 
-	-- PC: WASD (bir kutuya yazarken çalışmaz)
 	if not typing then
 		if UIS:IsKeyDown(Enum.KeyCode.W) then dir += cf.LookVector end
 		if UIS:IsKeyDown(Enum.KeyCode.S) then dir -= cf.LookVector end
@@ -747,7 +984,6 @@ RS.RenderStepped:Connect(function()
 		if UIS:IsKeyDown(Enum.KeyCode.A) then dir -= cf.RightVector end
 	end
 
-	-- Telefon / gamepad: joystick (kameranın baktığı yöne göre eğimli gider)
 	if dir.Magnitude == 0 and hum.MoveDirection.Magnitude > 0 then
 		dir = hum.MoveDirection
 		local look = cf.LookVector
@@ -757,7 +993,6 @@ RS.RenderStepped:Connect(function()
 		end
 	end
 
-	-- Yukarı / aşağı
 	if not typing then
 		if UIS:IsKeyDown(Enum.KeyCode.Space) then dir += Vector3.yAxis end
 		if UIS:IsKeyDown(Enum.KeyCode.LeftControl) or UIS:IsKeyDown(Enum.KeyCode.LeftShift) then dir -= Vector3.yAxis end
@@ -769,14 +1004,14 @@ RS.RenderStepped:Connect(function()
 	flyBG.CFrame = cf
 end)
 
--- Aimlock dairesi: PC'de fareyi takip eder, telefonda ekranın ortasında durur
+-- Aimlock dairesi
 RS.RenderStepped:Connect(function()
 	if not S.aimOn then return end
 	local m = aimRef()
 	aimFovCircle.Position = UDim2.fromOffset(m.X, m.Y)
 end)
 
--- Aimlock döngüsü (kamera scriptinden sonra çalışır, PC + mobil)
+-- Aimlock döngüsü
 RS:BindToRenderStep("RuzgarAim", Enum.RenderPriority.Camera.Value + 1, function()
 	if not S.aimOn then return end
 	local holding = aimHeld or UIS:IsMouseButtonPressed(Enum.UserInputType.MouseButton2)
@@ -794,116 +1029,380 @@ RS:BindToRenderStep("RuzgarAim", Enum.RenderPriority.Camera.Value + 1, function(
 	end
 end)
 
+-- Anti-fling varsayılan olarak açık başlar
+antiSet(true)
+
 print("[ruzgarzorx] menu hazir")
 
--- AÇILIŞ ANİMASYONU
+-- ================= AÇILIŞ ANİMASYONU (ULTRA HDR SİNEMATİK) =================
 task.spawn(function()
-	local g, blur
-	local audio = {}
+	local Debris = game:GetService("Debris")
+
+	local CFG = {
+		NAME = "RUZGARZORX",
+		WIND_COUNT = mobile and 60 or 120,
+		BLUE = Color3.fromRGB(0, 145, 255),
+		CYAN = Color3.fromRGB(70, 220, 255),
+		WHITE = Color3.fromRGB(235, 250, 255),
+		SOUND_ID = "rbxassetid://9118823101",
+	}
 	local BASS, PING = "rbxasset://sounds/bass.wav", "rbxasset://sounds/electronicpingshort.wav"
 	local finalSize, finalPos = main.Size, main.Position
 	main.Visible = false
 
-	local function fx(id, vol, speed, looped, reverbTime, distLevel)
-		local ok, s = pcall(function()
-			local x = new("Sound", { SoundId = id, Volume = vol, PlaybackSpeed = speed, Looped = looped or false }, SoundService)
-			if reverbTime then pcall(function() new("ReverbSoundEffect", { DecayTime = reverbTime }, x) end) end
-			if distLevel then pcall(function() new("DistortionSoundEffect", { Level = distLevel }, x) end) end
-			x:Play()
-			table.insert(audio, x)
-			if not looped then task.delay(8, function() x:Destroy() end) end
-			return x
-		end)
-		return ok and s or nil
+	local old = pg:FindFirstChild("RZG_HDR_INTRO")
+	if old then old:Destroy() end
+	for _, n in { "RZG_HDR_Bloom", "RZG_HDR_Color", "RZG_HDR_Blur" } do
+		local o = Lighting:FindFirstChild(n)
+		if o then o:Destroy() end
 	end
-	local function tween(obj, info, props)
-		if obj then pcall(function() TS:Create(obj, info, props):Play() end) end
+
+	local active, skipped = true, false
+	local gui2, canvas
+	local conns = {}
+
+	local function circle(o) new("UICorner", { CornerRadius = UDim.new(1, 0) }, o) end
+	local function alive() return active and not skipped and gui2 ~= nil and gui2.Parent ~= nil end
+
+	local function tw(obj, t, props, style, dir, reps, rev)
+		local info = TweenInfo.new(t, style or Enum.EasingStyle.Quint, dir or Enum.EasingDirection.Out, reps or 0, rev or false)
+		local a = TS:Create(obj, info, props)
+		a:Play()
+		return a
 	end
+
+	local function sfx(id, speed, vol)
+		local s = new("Sound", { SoundId = id, Volume = vol or .5, PlaybackSpeed = speed or 1 }, SoundService)
+		s:Play()
+		Debris:AddItem(s, 12)
+	end
+
+	local function pause(t)
+		local e = os.clock() + t
+		while os.clock() < e and not skipped do task.wait(.03) end
+		return not skipped
+	end
+
+	local bloom = new("BloomEffect", { Name = "RZG_HDR_Bloom", Intensity = .65, Size = 42, Threshold = .82 }, Lighting)
+	local cc = new("ColorCorrectionEffect", { Name = "RZG_HDR_Color", Brightness = .025, Contrast = .22, Saturation = .25,
+		TintColor = Color3.fromRGB(190, 225, 255) }, Lighting)
+	local blur = new("BlurEffect", { Name = "RZG_HDR_Blur", Size = 14 }, Lighting)
+
+	gui2 = new("ScreenGui", { Name = "RZG_HDR_INTRO", IgnoreGuiInset = true, ResetOnSpawn = false, DisplayOrder = 999999,
+		ZIndexBehavior = Enum.ZIndexBehavior.Sibling }, pg)
+	canvas = new("CanvasGroup", { Size = UDim2.fromScale(1, 1), BackgroundTransparency = 1, GroupTransparency = 0 }, gui2)
+
+	local skipBtn = new("TextButton", { AnchorPoint = Vector2.new(1, 1), Position = UDim2.new(1, -20, 1, -20), Size = UDim2.fromOffset(96, 32),
+		BackgroundColor3 = Color3.fromRGB(8, 22, 46), BackgroundTransparency = .35, Text = "ATLA  ›", Font = Enum.Font.GothamBold,
+		TextSize = 12, TextColor3 = CFG.CYAN, ZIndex = 200, AutoButtonColor = true }, gui2)
+	round(skipBtn, 16)
+	new("UIStroke", { Color = CFG.CYAN, Transparency = .5, Thickness = 1 }, skipBtn)
+	skipBtn.Activated:Connect(function() skipped = true end)
 
 	local ok, err = pcall(function()
-		g = new("ScreenGui", { Name = "RuzgarIntro", IgnoreGuiInset = true, ResetOnSpawn = false, DisplayOrder = 100 }, pg)
-		local bg = new("CanvasGroup", { Size = UDim2.new(1, 0, 1, 0), BackgroundColor3 = Color3.fromRGB(6, 5, 12), BorderSizePixel = 0 }, g)
-		local flash = new("Frame", { Size = UDim2.new(1, 0, 1, 0), BackgroundColor3 = WHITE, BackgroundTransparency = 1, BorderSizePixel = 0, ZIndex = 10 }, bg)
-		blur = new("BlurEffect", { Size = 16 }, Lighting)
+		local bg = new("Frame", { Size = UDim2.fromScale(1, 1), BackgroundColor3 = Color3.fromRGB(1, 3, 13), BorderSizePixel = 0, ZIndex = 1 }, canvas)
+		new("UIGradient", {
+			Color = ColorSequence.new({
+				ColorSequenceKeypoint.new(0, Color3.fromRGB(1, 3, 13)),
+				ColorSequenceKeypoint.new(.3, Color3.fromRGB(5, 13, 30)),
+				ColorSequenceKeypoint.new(.5, Color3.fromRGB(9, 24, 52)),
+				ColorSequenceKeypoint.new(.7, Color3.fromRGB(5, 13, 30)),
+				ColorSequenceKeypoint.new(1, Color3.fromRGB(1, 3, 13)),
+			}),
+			Rotation = 45,
+		}, bg)
 
-		local drone = fx(BASS, .5, .3, true, 4, .5)
-		tween(drone, TweenInfo.new(3.2, Enum.EasingStyle.Quad), { PlaybackSpeed = .8, Volume = 1 })
-		local riser = fx(PING, .05, .5, true, 3)
-		tween(riser, TweenInfo.new(3.2, Enum.EasingStyle.Quad, Enum.EasingDirection.In), { PlaybackSpeed = 3, Volume = .7 })
+		local glowRoot = new("Frame", { Size = UDim2.fromScale(1, 1), BackgroundTransparency = 1, ZIndex = 2 }, canvas)
+		local glowSettings = {
+			{ 900, .980, Color3.fromRGB(0, 35, 110) }, { 760, .975, Color3.fromRGB(0, 55, 150) },
+			{ 630, .965, Color3.fromRGB(0, 75, 190) }, { 500, .950, Color3.fromRGB(0, 110, 235) },
+			{ 390, .930, Color3.fromRGB(0, 140, 255) }, { 290, .900, Color3.fromRGB(20, 170, 255) },
+			{ 200, .850, Color3.fromRGB(55, 195, 255) }, { 120, .760, Color3.fromRGB(120, 220, 255) },
+			{ 58, .570, Color3.fromRGB(220, 250, 255) },
+		}
+		for _, d in glowSettings do
+			local orb = new("Frame", { AnchorPoint = Vector2.new(.5, .5), Position = UDim2.fromScale(.5, .5),
+				Size = UDim2.fromOffset(d[1], d[1]), BackgroundColor3 = d[3], BackgroundTransparency = d[2],
+				BorderSizePixel = 0, ZIndex = 2 }, glowRoot)
+			circle(orb)
+			tw(orb, 2.4, { BackgroundTransparency = math.max(d[2] - .03, 0) }, Enum.EasingStyle.Sine, Enum.EasingDirection.InOut, -1, true)
+		end
 
-		local function makeStar(color, z, thick)
-			local f = new("Frame", { AnchorPoint = Vector2.new(.5, .5), Position = UDim2.new(.5, 0, .5, 0),
-				Size = UDim2.new(0, 40, 0, 40), BackgroundTransparency = 1, ZIndex = z }, bg)
-			local pts = {}
-			for k = 0, 4 do
-				local ang = math.rad(-90 + 72 * k)
-				pts[k] = Vector2.new(.5 + .5 * math.cos(ang), .5 + .5 * math.sin(ang))
+		local raysRoot = new("Frame", { AnchorPoint = Vector2.new(.5, .5), Position = UDim2.fromScale(.5, .5),
+			Size = UDim2.fromOffset(720, 720), BackgroundTransparency = 1, ZIndex = 3 }, canvas)
+		for i = 1, 64 do
+			local ray = new("Frame", { AnchorPoint = Vector2.new(.5, .5), Position = UDim2.fromScale(.5, .5),
+				Size = UDim2.fromOffset(math.random(1, 4), math.random(180, 340)), Rotation = i / 64 * 360,
+				BackgroundColor3 = CFG.CYAN, BackgroundTransparency = math.random(65, 85) / 100, BorderSizePixel = 0, ZIndex = 3 }, raysRoot)
+			new("UIGradient", { Rotation = 90, Transparency = NumberSequence.new({
+				NumberSequenceKeypoint.new(0, 1), NumberSequenceKeypoint.new(.35, .55), NumberSequenceKeypoint.new(.5, .05),
+				NumberSequenceKeypoint.new(.65, .55), NumberSequenceKeypoint.new(1, 1) }) }, ray)
+		end
+		tw(raysRoot, 24, { Rotation = 360 }, Enum.EasingStyle.Linear)
+
+		for index, size in { 180, 260, 350, 460, 560, 680 } do
+			local holder = new("Frame", { AnchorPoint = Vector2.new(.5, .5), Position = UDim2.fromScale(.5, .5),
+				Size = UDim2.fromOffset(size, size), BackgroundTransparency = 1, ZIndex = 4 }, canvas)
+			local ring = new("Frame", { Size = UDim2.fromScale(1, 1), BackgroundTransparency = 1 }, holder)
+			circle(ring)
+			new("UIStroke", { Color = index % 2 == 0 and CFG.CYAN or CFG.BLUE, Thickness = index <= 2 and 2 or 1,
+				Transparency = .35 + index * .075 }, ring)
+			for t = 1, 16 do
+				local a = t / 16 * math.pi * 2
+				new("Frame", { AnchorPoint = Vector2.new(.5, .5),
+					Position = UDim2.new(.5, math.cos(a) * size / 2, .5, math.sin(a) * size / 2),
+					Size = UDim2.fromOffset(2, index <= 2 and 12 or 7), Rotation = math.deg(a) + 90,
+					BackgroundColor3 = CFG.CYAN, BackgroundTransparency = .25, BorderSizePixel = 0 }, holder)
 			end
-			for k = 0, 4 do
-				local p1, p2 = pts[k], pts[(k + 2) % 5]
-				local mid, d = (p1 + p2) / 2, p2 - p1
-				new("Frame", { AnchorPoint = Vector2.new(.5, .5), Position = UDim2.new(mid.X, 0, mid.Y, 0),
-					Size = UDim2.new(d.Magnitude, 0, thick, 0), Rotation = math.deg(math.atan2(d.Y, d.X)),
-					BackgroundColor3 = color, BorderSizePixel = 0, ZIndex = z }, f)
-			end
+			tw(holder, index % 2 == 0 and 18 or 25, { Rotation = index % 2 == 0 and 360 or -360 }, Enum.EasingStyle.Linear)
+		end
+
+		local coreRoot = new("Frame", { AnchorPoint = Vector2.new(.5, .5), Position = UDim2.fromScale(.5, .5),
+			Size = UDim2.fromOffset(130, 130), BackgroundTransparency = 1, ZIndex = 8 }, canvas)
+		local coreGlow = new("Frame", { AnchorPoint = Vector2.new(.5, .5), Position = UDim2.fromScale(.5, .5),
+			Size = UDim2.fromOffset(100, 100), BackgroundColor3 = CFG.BLUE, BackgroundTransparency = .5, BorderSizePixel = 0 }, coreRoot)
+		circle(coreGlow)
+		local core = new("Frame", { AnchorPoint = Vector2.new(.5, .5), Position = UDim2.fromScale(.5, .5),
+			Size = UDim2.fromOffset(30, 30), BackgroundColor3 = CFG.WHITE, BackgroundTransparency = .05, BorderSizePixel = 0 }, coreRoot)
+		circle(core)
+		new("UIStroke", { Color = CFG.CYAN, Thickness = 3, Transparency = .1 }, core)
+		tw(core, 1.1, { Size = UDim2.fromOffset(48, 48), BackgroundTransparency = .25 }, Enum.EasingStyle.Sine, Enum.EasingDirection.InOut, -1, true)
+		tw(coreGlow, 1.1, { Size = UDim2.fromOffset(170, 170), BackgroundTransparency = .85 }, Enum.EasingStyle.Sine, Enum.EasingDirection.InOut, -1, true)
+
+		local function flare(sx, sy)
+			local f = new("Frame", { AnchorPoint = Vector2.new(.5, .5), Position = UDim2.fromScale(.5, .5), Size = UDim2.fromOffset(sx, sy),
+				BackgroundColor3 = CFG.WHITE, BackgroundTransparency = .15, BorderSizePixel = 0, ZIndex = 9 }, canvas)
+			new("UIGradient", { Transparency = NumberSequence.new({ NumberSequenceKeypoint.new(0, 1),
+				NumberSequenceKeypoint.new(.5, 0), NumberSequenceKeypoint.new(1, 1) }) }, f)
 			return f
 		end
-		local sM, sC, sW = makeStar(MAG, 2, .045), makeStar(CYAN, 3, .045), makeStar(WHITE, 4, .03)
-		local stars = { sM, sC, sW }
+		local hFlare, vFlare = flare(240, 3), flare(3, 240)
+		tw(hFlare, 1.4, { Size = UDim2.fromOffset(340, 3) }, Enum.EasingStyle.Sine, Enum.EasingDirection.InOut, -1, true)
+		tw(vFlare, 1.4, { Size = UDim2.fromOffset(3, 340) }, Enum.EasingStyle.Sine, Enum.EasingDirection.InOut, -1, true)
 
-		local H = cam.ViewportSize.Y
-		local dur, t0 = 3.2, os.clock()
-		local last, rot, pings = t0, 0, 0
-		while true do
-			local now = os.clock()
-			local a = (now - t0) / dur
-			if a >= 1 then break end
-			local dt = now - last
-			last = now
-			rot += dt * (120 + 1100 * a * a)
-			local size = 40 + H * 2.2 * a * a * a
-			for _, s in stars do s.Size = UDim2.new(0, size, 0, size) end
-			sM.Rotation, sC.Rotation, sW.Rotation = rot + 12 * a, rot - 12 * a, rot
-			if a * 14 > pings then
-				pings += 1
-				fx(PING, .3, .6 + a * 2.2, false, 1)
+		local orbit = {}
+		for i = 1, 14 do
+			local f = new("Frame", { AnchorPoint = Vector2.new(.5, .5), Position = UDim2.fromScale(.5, .5),
+				Size = UDim2.fromOffset(math.random(3, 7), math.random(3, 7)), BackgroundColor3 = CFG.CYAN,
+				BackgroundTransparency = .1, BorderSizePixel = 0, ZIndex = 10 }, canvas)
+			circle(f)
+			table.insert(orbit, { f = f, a = i / 14 * math.pi * 2, r = math.random(100, 240), s = (math.random() * .6 + .4) * (i % 2 == 0 and 1 or -1) })
+		end
+		table.insert(conns, RS.RenderStepped:Connect(function(dt)
+			for _, o in orbit do
+				o.a += dt * o.s
+				o.f.Position = UDim2.new(.5, math.cos(o.a) * o.r, .5, math.sin(o.a) * o.r)
 			end
-			RS.RenderStepped:Wait()
+		end))
+
+		local function shockwave(color, maxSize, t)
+			local r = new("Frame", { AnchorPoint = Vector2.new(.5, .5), Position = UDim2.fromScale(.5, .5),
+				Size = UDim2.fromOffset(20, 20), BackgroundTransparency = 1, ZIndex = 11 }, canvas)
+			circle(r)
+			local st = new("UIStroke", { Color = color, Thickness = 4, Transparency = 0 }, r)
+			tw(r, t, { Size = UDim2.fromOffset(maxSize, maxSize) }, Enum.EasingStyle.Quint, Enum.EasingDirection.Out)
+			tw(st, t, { Transparency = 1, Thickness = 1 }, Enum.EasingStyle.Quad, Enum.EasingDirection.Out)
+			Debris:AddItem(r, t + .2)
 		end
 
-		pcall(function() drone:Stop() end)
-		pcall(function() riser:Stop() end)
-		for _, s in stars do s:Destroy() end
-		flash.BackgroundTransparency = 0
-		fx(BASS, 2.2, .35, false, 3.5, .7)
-		fx(BASS, 1.5, .6, false, 2)
-		fx(PING, .8, 2, false, 4)
-		tween(blur, TweenInfo.new(.8), { Size = 0 })
-		task.wait(.15)
-		tween(flash, TweenInfo.new(.9), { BackgroundTransparency = 1 })
+		local function spawnWind(count)
+			for _ = 1, count do
+				task.delay(math.random() * 1.4, function()
+					if not alive() then return end
+					local side = math.random(1, 4)
+					local start
+					if side == 1 then start = Vector2.new(-.12, math.random())
+					elseif side == 2 then start = Vector2.new(1.12, math.random())
+					elseif side == 3 then start = Vector2.new(math.random(), -.12)
+					else start = Vector2.new(math.random(), 1.12) end
 
-		local title = new("TextLabel", { AnchorPoint = Vector2.new(.5, .5), Position = UDim2.new(.5, 0, .5, 0), Size = UDim2.new(1, 0, 0, 120),
-			BackgroundTransparency = 1, Text = "RUZGARZORX", Font = Enum.Font.GothamBlack, TextSize = 40, TextColor3 = WHITE,
-			TextTransparency = 1, ZIndex = 5 }, bg)
-		new("UIGradient", { Color = ColorSequence.new(CYAN, MAG) }, title)
-		tween(title, TweenInfo.new(1, Enum.EasingStyle.Back, Enum.EasingDirection.Out), { TextSize = 92, TextTransparency = 0 })
-		task.wait(1.6)
+					local center = Vector2.new(.5, .5)
+					local direction = center - start
+					local perp = Vector2.new(-direction.Y, direction.X)
+					local middle = start + direction * .55 + perp * (math.random(-20, 20) / 100)
+					local finish = center + Vector2.new(math.random(-3, 3) / 100, math.random(-3, 3) / 100)
+					local a1 = math.deg(math.atan2(middle.Y - start.Y, middle.X - start.X))
+					local a2 = math.deg(math.atan2(finish.Y - middle.Y, finish.X - middle.X))
 
-		local cx = UDim2.new(finalPos.X.Scale, finalPos.X.Offset + finalSize.X.Offset / 2, finalPos.Y.Scale, finalPos.Y.Offset + finalSize.Y.Offset / 2)
-		main.ClipsDescendants = true
-		main.Size, main.Position = UDim2.new(0, 0, 0, 0), cx
-		main.Visible = true
-		tween(main, TweenInfo.new(.7, Enum.EasingStyle.Back, Enum.EasingDirection.Out), { Size = finalSize, Position = finalPos })
-		fx(PING, .5, 1.6, false, 1)
-		tween(bg, TweenInfo.new(.7), { GroupTransparency = 1 })
-		task.wait(.8)
+					local streak = new("Frame", { AnchorPoint = Vector2.new(.5, .5), Position = UDim2.fromScale(start.X, start.Y),
+						Size = UDim2.fromOffset(math.random(35, 150), math.random(1, 3)), Rotation = a1,
+						BackgroundColor3 = CFG.CYAN, BackgroundTransparency = .2, BorderSizePixel = 0, ZIndex = 6 }, canvas)
+					circle(streak)
+					new("UIGradient", { Transparency = NumberSequence.new({ NumberSequenceKeypoint.new(0, 1),
+						NumberSequenceKeypoint.new(.5, 0), NumberSequenceKeypoint.new(1, 1) }) }, streak)
+
+					tw(streak, .8, { Position = UDim2.fromScale(middle.X, middle.Y), Rotation = a2 },
+						Enum.EasingStyle.Sine, Enum.EasingDirection.In).Completed:Wait()
+					if not alive() or not streak.Parent then if streak.Parent then streak:Destroy() end return end
+
+					tw(streak, .55, { Position = UDim2.fromScale(finish.X, finish.Y), Size = UDim2.fromOffset(0, 1),
+						BackgroundTransparency = 1, Rotation = a2 + 180 }, Enum.EasingStyle.Quint, Enum.EasingDirection.In).Completed:Wait()
+					if streak.Parent then streak:Destroy() end
+				end)
+			end
+		end
+		spawnWind(CFG.WIND_COUNT)
+
+		local function sparks(count)
+			for _ = 1, count do
+				local a = math.random() * math.pi * 2
+				local dist = math.random(70, 370)
+				local s = new("Frame", { AnchorPoint = Vector2.new(.5, .5), Position = UDim2.fromScale(.5, .5),
+					Size = UDim2.fromOffset(math.random(2, 5), math.random(2, 5)), BackgroundColor3 = CFG.WHITE,
+					BorderSizePixel = 0, ZIndex = 12 }, canvas)
+				circle(s)
+				tw(s, math.random(8, 18) / 10, { Position = UDim2.new(.5, math.cos(a) * dist, .5, math.sin(a) * dist),
+					BackgroundTransparency = 1, Size = UDim2.fromOffset(0, 0) }, Enum.EasingStyle.Quint, Enum.EasingDirection.Out)
+				Debris:AddItem(s, 2)
+			end
+		end
+
+		local scanner = new("Frame", { Position = UDim2.fromScale(-.3, .1), Size = UDim2.fromScale(.18, .8), Rotation = 15,
+			BackgroundColor3 = CFG.CYAN, BackgroundTransparency = .75, BorderSizePixel = 0, ZIndex = 13 }, canvas)
+		new("UIGradient", { Transparency = NumberSequence.new({ NumberSequenceKeypoint.new(0, 1),
+			NumberSequenceKeypoint.new(.5, .05), NumberSequenceKeypoint.new(1, 1) }) }, scanner)
+		task.delay(2, function()
+			if alive() then tw(scanner, 2.5, { Position = UDim2.fromScale(1.3, .1) }, Enum.EasingStyle.Sine) end
+		end)
+
+		local function hudCorner(x, y)
+			local left, top = x < .5, y < .5
+			local anchor = Vector2.new(left and 0 or 1, top and 0 or 1)
+			local h = new("Frame", { AnchorPoint = anchor, Position = UDim2.fromScale(x, y), Size = UDim2.fromOffset(0, 2),
+				BackgroundColor3 = CFG.CYAN, BorderSizePixel = 0, ZIndex = 14 }, canvas)
+			local v = new("Frame", { AnchorPoint = anchor, Position = UDim2.fromScale(x, y), Size = UDim2.fromOffset(2, 0),
+				BackgroundColor3 = CFG.CYAN, BorderSizePixel = 0, ZIndex = 14 }, canvas)
+			tw(h, 1, { Size = UDim2.fromOffset(65, 2) })
+			tw(v, 1, { Size = UDim2.fromOffset(2, 65) })
+		end
+		hudCorner(.06, .14) hudCorner(.94, .14) hudCorner(.06, .86) hudCorner(.94, .86)
+
+		local topBar = new("Frame", { Size = UDim2.new(1, 0, 0, 0), BackgroundColor3 = Color3.new(0, 0, 0), BorderSizePixel = 0, ZIndex = 50 }, canvas)
+		local botBar = new("Frame", { AnchorPoint = Vector2.new(0, 1), Position = UDim2.fromScale(0, 1), Size = UDim2.new(1, 0, 0, 0),
+			BackgroundColor3 = Color3.new(0, 0, 0), BorderSizePixel = 0, ZIndex = 50 }, canvas)
+		tw(topBar, 1.2, { Size = UDim2.new(1, 0, .055, 0) })
+		tw(botBar, 1.2, { Size = UDim2.new(1, 0, .055, 0) })
+
+		new("TextLabel", { AnchorPoint = Vector2.new(0, 1), Position = UDim2.new(0, 20, 1, -14), Size = UDim2.fromOffset(200, 16),
+			BackgroundTransparency = 1, Text = "RZG // HDR INTRO V5", Font = Enum.Font.GothamMedium, TextSize = 10,
+			TextColor3 = Color3.fromRGB(110, 170, 220), TextTransparency = .3, TextXAlignment = Enum.TextXAlignment.Left, ZIndex = 60 }, canvas)
+
+		local shadow = new("TextLabel", { AnchorPoint = Vector2.new(.5, .5), Position = UDim2.new(.5, 4, .49, 5), Size = UDim2.fromScale(.9, .18),
+			BackgroundTransparency = 1, Text = CFG.NAME, Font = Enum.Font.GothamBlack, TextScaled = true, TextColor3 = CFG.BLUE,
+			TextTransparency = 1, ZIndex = 19 }, canvas)
+		local title = new("TextLabel", { AnchorPoint = Vector2.new(.5, .5), Position = UDim2.fromScale(.5, .49), Size = UDim2.fromScale(.9, .18),
+			BackgroundTransparency = 1, Text = CFG.NAME, Font = Enum.Font.GothamBlack, TextScaled = true, TextColor3 = CFG.WHITE,
+			TextTransparency = 1, TextStrokeColor3 = CFG.BLUE, TextStrokeTransparency = 1, ZIndex = 20 }, canvas)
+		new("UITextSizeConstraint", { MinTextSize = 22, MaxTextSize = 78 }, title)
+		new("UITextSizeConstraint", { MinTextSize = 22, MaxTextSize = 78 }, shadow)
+		local titleGradient = new("UIGradient", { Color = ColorSequence.new({
+			ColorSequenceKeypoint.new(0, Color3.fromRGB(80, 160, 255)),
+			ColorSequenceKeypoint.new(.5, Color3.fromRGB(255, 255, 255)),
+			ColorSequenceKeypoint.new(1, Color3.fromRGB(80, 160, 255)) }), Offset = Vector2.new(-1, 0) }, title)
+		local titleScale = new("UIScale", { Scale = 2.3 }, title)
+		local shadowScale = new("UIScale", { Scale = 2.3 }, shadow)
+
+		sfx(CFG.SOUND_ID, .75, .65)
+		sfx(BASS, .35, .8)
+
+		if not pause(2.3) then return end
+
+		tw(title, .9, { TextTransparency = 0, TextStrokeTransparency = .2 }, Enum.EasingStyle.Back)
+		tw(shadow, .9, { TextTransparency = .65 })
+		tw(titleScale, 1.3, { Scale = 1 }, Enum.EasingStyle.Back)
+		tw(shadowScale, 1.3, { Scale = 1 }, Enum.EasingStyle.Back)
+		tw(titleGradient, 1.7, { Offset = Vector2.new(0, 0) }, Enum.EasingStyle.Sine)
+		shockwave(CFG.CYAN, 900, 1.4)
+		sfx(PING, .7, .5)
+		task.delay(1.4, function()
+			if alive() then tw(shadow, 1.2, { TextTransparency = .85 }, Enum.EasingStyle.Sine, Enum.EasingDirection.InOut, -1, true) end
+		end)
+
+		local subtitle = new("TextLabel", { AnchorPoint = Vector2.new(.5, .5), Position = UDim2.fromScale(.5, .59),
+			Size = UDim2.fromOffset(480, 35), BackgroundTransparency = 1, Text = "THE WIND HAS ARRIVED", TextColor3 = CFG.CYAN,
+			TextSize = 14, Font = Enum.Font.GothamBold, TextTransparency = 1, ZIndex = 21 }, canvas)
+		local subLine = new("Frame", { AnchorPoint = Vector2.new(.5, .5), Position = UDim2.fromScale(.5, .555), Size = UDim2.fromOffset(0, 2),
+			BackgroundColor3 = CFG.CYAN, BorderSizePixel = 0, ZIndex = 21 }, canvas)
+
+		if not pause(.8) then return end
+		tw(subLine, .6, { Size = UDim2.fromOffset(250, 2) })
+		tw(subtitle, .7, { TextTransparency = 0 })
+
+		if not pause(1.1) then return end
+		sparks(mobile and 40 or 65)
+		sfx(CFG.SOUND_ID, 1.15, .5)
+		shockwave(CFG.WHITE, 1100, 1.1)
+		spawnWind(mobile and 30 or 70)
+
+		local loadingText = new("TextLabel", { AnchorPoint = Vector2.new(.5, .5), Position = UDim2.fromScale(.5, .77), Size = UDim2.fromOffset(350, 25),
+			BackgroundTransparency = 1, Text = "INITIALIZING SYSTEM...", TextColor3 = Color3.fromRGB(140, 200, 245), TextSize = 12,
+			Font = Enum.Font.GothamMedium, TextTransparency = 1, ZIndex = 22 }, canvas)
+		local percentage = new("TextLabel", { AnchorPoint = Vector2.new(.5, .5), Position = UDim2.fromScale(.5, .815), Size = UDim2.fromOffset(100, 25),
+			BackgroundTransparency = 1, Text = "0%", TextColor3 = CFG.WHITE, TextSize = 13, Font = Enum.Font.GothamBold,
+			TextTransparency = 1, ZIndex = 22 }, canvas)
+		local barBack = new("Frame", { AnchorPoint = Vector2.new(.5, .5), Position = UDim2.fromScale(.5, .85), Size = UDim2.fromOffset(270, 4),
+			BackgroundColor3 = Color3.fromRGB(35, 55, 80), BackgroundTransparency = 1, BorderSizePixel = 0, ZIndex = 22 }, canvas)
+		local barFill = new("Frame", { Size = UDim2.fromScale(0, 1), BackgroundColor3 = CFG.CYAN, BorderSizePixel = 0, ZIndex = 23 }, barBack)
+		circle(barBack) circle(barFill)
+
+		if not pause(.7) then return end
+		tw(loadingText, .5, { TextTransparency = 0 })
+		tw(percentage, .5, { TextTransparency = 0 })
+		tw(barBack, .5, { BackgroundTransparency = 0 })
+
+		local messages = { [1] = "INITIALIZING SYSTEM...", [20] = "WIND ENGINE STARTING...", [45] = "ENERGY SYNCHRONIZING...",
+			[70] = "LOADING INTERFACE...", [95] = "FINALIZING...", [100] = "SYSTEM ONLINE" }
+		for i = 1, 100 do
+			if skipped then return end
+			percentage.Text = i .. "%"
+			if messages[i] then loadingText.Text = messages[i] end
+			barFill.Size = UDim2.fromScale(i / 100, 1)
+			task.wait(.025)
+		end
+
+		if not pause(.8) then return end
+		sparks(mobile and 60 or 100)
+		sfx(CFG.SOUND_ID, .65, .9)
+		sfx(BASS, .6, 1.5)
+		shockwave(CFG.CYAN, 1400, 1.2)
+
+		local flash = new("Frame", { Size = UDim2.fromScale(1, 1), BackgroundColor3 = CFG.WHITE, BackgroundTransparency = 1,
+			BorderSizePixel = 0, ZIndex = 100 }, canvas)
+		tw(flash, .12, { BackgroundTransparency = .08 })
+		task.wait(.12)
+		tw(flash, .65, { BackgroundTransparency = 1 })
+	end)
+	if not ok then warn("[ruzgarzorx intro] HATA:", err) end
+
+	-- ===== ÇIKIŞ + MENÜ AÇILIŞI =====
+	local fade = skipped and .35 or .9
+	pcall(function()
+		tw(canvas, fade, { GroupTransparency = 1 })
+		if skipBtn then skipBtn.Visible = false end
+		tw(blur, 1, { Size = 0 })
+		tw(bloom, 1, { Intensity = 0 })
+		tw(cc, 1, { Brightness = 0, Contrast = 0, Saturation = 0, TintColor = Color3.new(1, 1, 1) })
 	end)
 
-	if not ok then warn("[ruzgarzorx intro] HATA:", err) end
-	for _, s in audio do pcall(function() s:Destroy() end) end
+	-- Menü büyüyerek açılır
+	local cx = UDim2.new(finalPos.X.Scale, finalPos.X.Offset + finalSize.X.Offset / 2, finalPos.Y.Scale, finalPos.Y.Offset + finalSize.Y.Offset / 2)
+	main.ClipsDescendants = true
+	main.Size, main.Position = UDim2.new(0, 0, 0, 0), cx
+	main.Visible = true
+	tw(main, .7, { Size = finalSize, Position = finalPos }, Enum.EasingStyle.Back, Enum.EasingDirection.Out)
+	sfx(PING, 1.6, .5)
+
+	task.wait(math.max(fade, 1) + .15)
+
+	active = false
+	for _, c in conns do pcall(function() c:Disconnect() end) end
+	if gui2 then gui2:Destroy() end
+	if blur then blur:Destroy() end
+	if bloom then bloom:Destroy() end
+	if cc then cc:Destroy() end
+
 	main.ClipsDescendants = false
 	main.Size, main.Position, main.Visible = finalSize, finalPos, true
-	if blur then blur:Destroy() end
-	if g then g:Destroy() end
+	introBusy = false
 	print("[ruzgarzorx] intro bitti")
 end)
