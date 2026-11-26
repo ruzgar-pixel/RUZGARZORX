@@ -1,0 +1,935 @@
+--// Aimlock v3 [RUZGARZORX] RED THEME TR/EN + ESP
+local Players      = game:GetService("Players")
+local RunService   = game:GetService("RunService")
+local UserInputService = game:GetService("UserInputService")
+local WS           = game:GetService("Workspace")
+local StarterGui   = game:GetService("StarterGui")
+
+local lp  = Players.LocalPlayer
+local cam = WS.CurrentCamera
+
+local function aimPoint()
+	if UserInputService.TouchEnabled and not UserInputService.MouseEnabled then
+		local vs = cam.ViewportSize
+		return Vector2.new(vs.X / 2, vs.Y / 2)
+	end
+	return UserInputService:GetMouseLocation()
+end
+
+----------------------------------------------------------------
+-- DİL / LANGUAGE
+----------------------------------------------------------------
+local Lang = {
+	TR = {
+		Title      = "RUZGARZORX v3",
+		Sub        = "Aimlock • Yapışkan • Prediction",
+		NotifyLoad = "RUZGARZORX v3 yüklendi — sağ tık ile nişan al",
+		NotifyOn   = "Aktif",
+		NotifyOff  = "Kapalı",
+		HoldMode   = "Sağ Tık Modu",
+		HoldOn     = "Sağ tık: basılı tut",
+		HoldOff    = "Toggle: ",
+		Sticky     = "Yapışkan Hedef",
+		Team       = "Takım Kontrolü",
+		Wall       = "Duvar Kontrolü",
+		Highlight  = "Highlight",
+		Circle     = "FOV Dairesi",
+		Fov        = "FOV",
+		Smooth     = "Yumuşaklık",
+		Pred       = "Prediction",
+		Lang       = "Dil / Language",
+		LangTr     = "Türkçe",
+		LangEn     = "İngilizce",
+		Target     = "Hedef: yok",
+		TargetFound = "🎯 Hedef: ",
+		Gen        = "GENERAL",
+		Settings   = "AYARLAR",
+		Esp        = "ESP",
+		Mobile     = "MOBİL",
+		AimBtn     = "Mobil Aim Butonu",
+		BtnLock    = "Butonu Sabitle",
+		BtnSize    = "Buton Boyutu",
+	},
+	EN = {
+		Title      = "RUZGARZORX v3",
+		Sub        = "Aimlock • Sticky • Prediction",
+		NotifyLoad = "RUZGARZORX v3 loaded — right click to aim",
+		NotifyOn   = "Active",
+		NotifyOff  = "Disabled",
+		HoldMode   = "Hold Mode",
+		HoldOn     = "Hold: right click",
+		HoldOff    = "Toggle: ",
+		Sticky     = "Sticky Target",
+		Team       = "Team Check",
+		Wall       = "Wall Check",
+		Highlight  = "Highlight",
+		Circle     = "FOV Circle",
+		Fov        = "FOV",
+		Smooth     = "Smoothing",
+		Pred       = "Prediction",
+		Lang       = "Language / Dil",
+		LangTr     = "Turkish",
+		LangEn     = "English",
+		Target     = "Target: none",
+		TargetFound = "🎯 Target: ",
+		Gen        = "GENERAL",
+		Settings   = "SETTINGS",
+		Esp        = "ESP",
+		Mobile     = "MOBILE",
+		AimBtn     = "Mobile Aim Button",
+		BtnLock    = "Lock Button",
+		BtnSize    = "Button Size",
+	},
+}
+
+local currentLang = "TR"
+local function L(key) return Lang[currentLang][key] or key end
+
+-- Dil değişince çalıştırılacak yazı güncelleyiciler
+local langUpdaters = {}
+
+----------------------------------------------------------------
+-- AYARLAR
+----------------------------------------------------------------
+local cfg = {
+	HoldToAim   = true,
+	ToggleKey   = Enum.KeyCode.E,
+	AimKey      = Enum.UserInputType.MouseButton2,
+	FOV         = 120,
+	Smoothing   = 0.22,
+	Prediction  = 0.12,
+	Part        = "Head",
+	TeamCheck   = true,
+	WallCheck   = true,
+	Sticky      = true,
+	StickyFOV   = 2.5,
+	Highlight   = true,
+	ShowCircle  = true,
+	Notify      = true,
+	Esp         = false,
+	ShowAimBtn  = UserInputService.TouchEnabled,
+	BtnLocked   = true,
+	BtnSize     = 80,
+}
+
+local enabled  = true
+local aiming   = false
+local target   = nil
+local highlight = nil
+local highlightedChar = nil
+local espHighlights = {}
+
+----------------------------------------------------------------
+-- TEMA KIRMIZI
+----------------------------------------------------------------
+local THEME = {
+	Bg        = Color3.fromRGB(15, 15, 20),
+	Panel     = Color3.fromRGB(25, 25, 35),
+	Accent    = Color3.fromRGB(255, 50, 50),
+	AccentDim = Color3.fromRGB(70, 30, 30),
+	Text      = Color3.fromRGB(235, 235, 245),
+	TextDim   = Color3.fromRGB(160, 160, 175),
+	Border    = Color3.fromRGB(70, 40, 40),
+	Danger    = Color3.fromRGB(255, 60, 60),
+	Success   = Color3.fromRGB(255, 60, 60),
+	Neon      = Color3.fromRGB(255, 40, 40),
+}
+
+----------------------------------------------------------------
+-- BİLDİRİM
+----------------------------------------------------------------
+local function notify(text)
+	if not cfg.Notify then return end
+	pcall(function()
+		StarterGui:SetCore("SendNotification", {
+			Title = "RUZGARZORX",
+			Text = text,
+			Duration = 3,
+		})
+	end)
+end
+
+----------------------------------------------------------------
+-- FOV
+----------------------------------------------------------------
+-- Drawing API telefonlarda çoğu zaman çizmiyor, o yüzden her cihazda
+-- çalışan GUI dairesi kullanıyoruz (kırmızı).
+local fovGui = Instance.new("ScreenGui")
+fovGui.Name = "RzFov"
+fovGui.IgnoreGuiInset = true
+fovGui.ResetOnSpawn = false
+fovGui.DisplayOrder = 10
+fovGui.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
+fovGui.Parent = lp:WaitForChild("PlayerGui")
+
+local circle = Instance.new("Frame")
+circle.Name = "FovCircle"
+circle.AnchorPoint = Vector2.new(0.5, 0.5)
+circle.BackgroundTransparency = 1
+circle.BorderSizePixel = 0
+circle.Active = false
+circle.Visible = false
+circle.Parent = fovGui
+Instance.new("UICorner", circle).CornerRadius = UDim.new(1, 0)
+
+local circleStroke = Instance.new("UIStroke")
+circleStroke.Thickness = 2
+circleStroke.Color = THEME.Accent
+circleStroke.Transparency = 0.1
+circleStroke.Parent = circle
+
+local function circleColor(col)
+	circleStroke.Color = col
+end
+
+local function circleUpdate(pos, radius, visible)
+	circle.Size = UDim2.fromOffset(radius * 2, radius * 2)
+	circle.Position = UDim2.fromOffset(pos.X, pos.Y)
+	circle.Visible = visible
+end
+
+----------------------------------------------------------------
+-- HIGHLIGHT (Aimlock)
+----------------------------------------------------------------
+local function clearHighlight()
+	if highlight then highlight:Destroy() highlight = nil end
+	highlightedChar = nil
+end
+
+local function setHighlight(char)
+	clearHighlight()
+	if not cfg.Highlight or not char then return end
+	highlight = Instance.new("Highlight")
+	highlight.FillColor = THEME.Danger
+	highlight.OutlineColor = Color3.fromRGB(255, 255, 255)
+	highlight.FillTransparency = 0.6
+	highlight.Parent = char
+	highlightedChar = char
+end
+
+----------------------------------------------------------------
+-- ESP (Sadece parlama, kutu yok)
+----------------------------------------------------------------
+local function createEsp(plr)
+	if plr == lp then return end
+	if not plr.Character then return end
+
+	local ch = plr.Character
+	local existing = ch:FindFirstChild("RzEspGlow")
+	if existing then existing:Destroy() end
+
+	local hl = Instance.new("Highlight")
+	hl.Name = "RzEspGlow"
+	hl.FillColor = THEME.Neon
+	hl.OutlineColor = THEME.Neon
+	hl.FillTransparency = 0.4
+	hl.OutlineTransparency = 0
+	hl.Parent = ch
+
+	espHighlights[plr] = hl
+end
+
+local function removeEsp(plr)
+	if espHighlights[plr] then
+		espHighlights[plr]:Destroy()
+		espHighlights[plr] = nil
+	end
+	if plr.Character then
+		local hl = plr.Character:FindFirstChild("RzEspGlow")
+		if hl then hl:Destroy() end
+	end
+end
+
+local function clearAllEsp()
+	for plr, hl in pairs(espHighlights) do
+		if hl then hl:Destroy() end
+	end
+	espHighlights = {}
+end
+
+local function updateEsp()
+	for _, plr in ipairs(Players:GetPlayers()) do
+		if plr ~= lp then
+			if cfg.Esp then
+				if not (cfg.TeamCheck and plr.Team and plr.Team == lp.Team) then
+					local cur = espHighlights[plr]
+					if (not cur or cur.Parent ~= plr.Character) and plr.Character then
+						createEsp(plr)
+					end
+				else
+					removeEsp(plr)
+				end
+			else
+				removeEsp(plr)
+			end
+		end
+	end
+
+	for plr, hl in pairs(espHighlights) do
+		if not plr.Parent then
+			if hl then hl:Destroy() end
+			espHighlights[plr] = nil
+		end
+	end
+end
+
+----------------------------------------------------------------
+-- HEDAF
+----------------------------------------------------------------
+local function isVisible(part)
+	local origin = cam.CFrame.Position
+	local ign = { part.Parent, cam }
+	if lp.Character then table.insert(ign, lp.Character) end
+
+	local p = RaycastParams.new()
+	p.FilterType = Enum.RaycastFilterType.Exclude
+	p.RespectCanCollide = true -- CanCollide kapalı parçalar (görünmez duvar, tetikleyici vs.) engel sayılmaz
+	p.IgnoreWater = true
+
+	-- Neredeyse şeffaf parçaları da atla (en fazla 6 kez)
+	for _ = 1, 6 do
+		p.FilterDescendantsInstances = ign
+		local hit = WS:Raycast(origin, part.Position - origin, p)
+		if not hit then return true end
+		if hit.Instance.Transparency >= 0.9 then
+			table.insert(ign, hit.Instance)
+		else
+			return false
+		end
+	end
+	return false
+end
+
+-- Hedef parçayı bul (Head yoksa HumanoidRootPart, o da yoksa herhangi bir parça)
+local function getAimPart(ch)
+	if not ch then return nil end
+	return ch:FindFirstChild(cfg.Part)
+		or ch:FindFirstChild("HumanoidRootPart")
+		or ch:FindFirstChild("Torso")
+		or ch:FindFirstChild("UpperTorso")
+		or ch.PrimaryPart
+		or ch:FindFirstChildWhichIsA("BasePart")
+end
+
+local function validPlayer(plr)
+	if plr == lp then return false end
+	if cfg.TeamCheck and plr.Team and plr.Team == lp.Team then return false end
+	return true
+end
+
+local function candidateDistance(part)
+	local mousePos = aimPoint()
+	local sp, onScreen = cam:WorldToViewportPoint(part.Position)
+	if not onScreen or sp.Z <= 0 then return math.huge end
+	return (Vector2.new(sp.X, sp.Y) - mousePos).Magnitude
+end
+
+local function getTarget()
+	local best, bestD = nil, math.huge
+	for _, plr in ipairs(Players:GetPlayers()) do
+		if not validPlayer(plr) then continue end
+		local ch   = plr.Character
+		local hum  = ch and ch:FindFirstChildOfClass("Humanoid")
+		local part = getAimPart(ch)
+		if not (hum and part and hum.Health > 0 and part.Parent) then continue end
+		if cfg.WallCheck and not isVisible(part) then continue end
+		local d = candidateDistance(part)
+		if d <= cfg.FOV and d < bestD then
+			best, bestD = part, d
+		end
+	end
+	return best
+end
+
+local function keepTarget()
+	if not target then return false end
+	local plr = Players:GetPlayerFromCharacter(target.Parent)
+	if not plr or not validPlayer(plr) then return false end
+	local hum = target.Parent and target.Parent:FindFirstChildOfClass("Humanoid")
+	if not (hum and hum.Health > 0 and target.Parent) then return false end
+	if cfg.WallCheck and not isVisible(target) then return false end
+	return candidateDistance(target) <= cfg.FOV * cfg.StickyFOV
+end
+
+----------------------------------------------------------------
+-- AIM LOOP
+----------------------------------------------------------------
+pcall(function() RunService:UnbindFromRenderStep("RzAim") end)
+RunService:BindToRenderStep("RzAim", Enum.RenderPriority.Camera.Value + 1, function()
+	local ok, err = pcall(function()
+		cam = WS.CurrentCamera
+		local mousePos = aimPoint()
+		circleUpdate(mousePos, cfg.FOV, cfg.ShowCircle)
+
+		updateEsp()
+
+		if not aiming then
+			if target then clearHighlight() end
+			target = nil
+			circleColor(THEME.Accent)
+			return
+		end
+
+		if not (target and cfg.Sticky and keepTarget()) then
+			target = getTarget()
+		end
+
+		if not (target and target.Parent) then
+			clearHighlight()
+			circleColor(THEME.Accent)
+			return
+		end
+
+		circleColor(THEME.Danger)
+		if highlightedChar ~= target.Parent or not highlight then
+			setHighlight(target.Parent)
+		end
+
+		local aimPos = target.Position
+		local hrp = target.Parent:FindFirstChild("HumanoidRootPart") or target
+		if cfg.Prediction > 0 and hrp then
+			aimPos = aimPos + hrp.AssemblyLinearVelocity * cfg.Prediction
+		end
+
+		local goal = CFrame.lookAt(cam.CFrame.Position, aimPos)
+		cam.CFrame = cam.CFrame:Lerp(goal, cfg.Smoothing)
+	end)
+	if not ok then warn("[RZ] Aim error:", err) end
+end)
+
+----------------------------------------------------------------
+-- INPUT
+----------------------------------------------------------------
+UserInputService.InputBegan:Connect(function(i, processed)
+	if processed then return end
+	if i.UserInputType == cfg.AimKey then
+		if cfg.HoldToAim then aiming = true end
+	elseif i.KeyCode == cfg.ToggleKey and not cfg.HoldToAim then
+		aiming = not aiming
+		notify(aiming and L("NotifyOn") or L("NotifyOff"))
+	end
+end)
+
+UserInputService.InputEnded:Connect(function(i)
+	if i.UserInputType == cfg.AimKey and cfg.HoldToAim then
+		aiming = false
+	end
+end)
+
+----------------------------------------------------------------
+-- MENÜ
+----------------------------------------------------------------
+local gui = Instance.new("ScreenGui")
+gui.Name = "RzMenu"
+gui.ResetOnSpawn = false
+gui.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
+gui.Parent = lp:WaitForChild("PlayerGui")
+
+local main = Instance.new("Frame")
+main.Size = UDim2.fromOffset(300, 500)
+main.Position = UDim2.fromOffset(20, 120)
+main.BackgroundColor3 = THEME.Bg
+main.BorderSizePixel = 0
+main.Active = true
+main.Draggable = false
+main.Parent = gui
+Instance.new("UICorner", main).CornerRadius = UDim.new(0, 12)
+Instance.new("UIStroke", main).Color = THEME.Border
+
+local grad = Instance.new("UIGradient")
+grad.Color = ColorSequence.new({ColorSequenceKeypoint.new(0, THEME.Bg), ColorSequenceKeypoint.new(1, Color3.fromRGB(30,30,40))})
+grad.Rotation = 45
+grad.Parent = main
+
+local header = Instance.new("Frame")
+header.Size = UDim2.new(1, 0, 0, 48)
+header.BackgroundColor3 = THEME.Panel
+header.BorderSizePixel = 0
+header.Parent = main
+Instance.new("UICorner", header).CornerRadius = UDim.new(0, 12)
+
+local title = Instance.new("TextLabel")
+title.Size = UDim2.new(1, -90, 0, 24)
+title.Position = UDim2.new(0, 16, 0, 8)
+title.BackgroundTransparency = 1
+title.Text = L("Title")
+title.TextColor3 = THEME.Accent
+title.Font = Enum.Font.GothamBold
+title.TextSize = 19
+title.TextXAlignment = Enum.TextXAlignment.Left
+title.Parent = header
+
+local subtitle = Instance.new("TextLabel")
+subtitle.Size = UDim2.new(1, -90, 0, 16)
+subtitle.Position = UDim2.new(0, 16, 0, 28)
+subtitle.BackgroundTransparency = 1
+subtitle.Text = L("Sub")
+subtitle.TextColor3 = THEME.TextDim
+subtitle.Font = Enum.Font.Gotham
+subtitle.TextSize = 12
+subtitle.TextXAlignment = Enum.TextXAlignment.Left
+subtitle.Parent = header
+
+local minimize = Instance.new("TextButton")
+minimize.Size = UDim2.fromOffset(28, 28)
+minimize.Position = UDim2.new(1, -34, 0, 10)
+minimize.BackgroundColor3 = THEME.Border
+minimize.Text = "—"
+minimize.TextColor3 = THEME.Text
+minimize.Font = Enum.Font.GothamBold
+minimize.TextSize = 16
+minimize.Parent = header
+Instance.new("UICorner", minimize).CornerRadius = UDim.new(1, 0)
+
+local body = Instance.new("ScrollingFrame")
+body.Size = UDim2.new(1, 0, 1, -48)
+body.Position = UDim2.new(0, 0, 0, 48)
+body.BackgroundTransparency = 1
+body.BorderSizePixel = 0
+body.ScrollBarThickness = 4
+body.ScrollBarImageColor3 = THEME.Accent
+body.AutomaticCanvasSize = Enum.AutomaticSize.Y
+body.CanvasSize = UDim2.new()
+body.ScrollingDirection = Enum.ScrollingDirection.Y
+body.Parent = main
+
+local listLayout = Instance.new("UIListLayout")
+listLayout.Padding = UDim.new(0, 10)
+listLayout.SortOrder = Enum.SortOrder.LayoutOrder
+listLayout.Parent = body
+
+local padding = Instance.new("UIPadding")
+padding.PaddingLeft = UDim.new(0, 14)
+padding.PaddingRight = UDim.new(0, 14)
+padding.PaddingTop = UDim.new(0, 12)
+padding.PaddingBottom = UDim.new(0, 12)
+padding.Parent = body
+
+-- Hedef durumu
+local statusCard = Instance.new("Frame")
+statusCard.Size = UDim2.new(1, 0, 0, 44)
+statusCard.BackgroundColor3 = THEME.Panel
+statusCard.BorderSizePixel = 0
+statusCard.Parent = body
+Instance.new("UICorner", statusCard).CornerRadius = UDim.new(0, 10)
+Instance.new("UIStroke", statusCard).Color = THEME.Border
+
+local statusLabel = Instance.new("TextLabel")
+statusLabel.Size = UDim2.new(1, -20, 1, 0)
+statusLabel.Position = UDim2.new(0, 12, 0, 0)
+statusLabel.BackgroundTransparency = 1
+statusLabel.Text = L("Target")
+statusLabel.TextColor3 = THEME.Text
+statusLabel.Font = Enum.Font.GothamBold
+statusLabel.TextSize = 14
+statusLabel.TextXAlignment = Enum.TextXAlignment.Left
+statusLabel.Parent = statusCard
+
+task.spawn(function()
+	while true do
+		task.wait(0.1)
+		local plr = target and Players:GetPlayerFromCharacter(target.Parent)
+		if plr then
+			statusLabel.Text = L("TargetFound") .. plr.Name
+			statusLabel.TextColor3 = THEME.Success
+		else
+			statusLabel.Text = L("Target")
+			statusLabel.TextColor3 = THEME.Text
+		end
+	end
+end)
+
+-- Ayracı
+local function separator(textKey)
+	local row = Instance.new("Frame")
+	row.Size = UDim2.new(1, 0, 0, 20)
+	row.BackgroundTransparency = 1
+	row.Parent = body
+
+	local line1 = Instance.new("Frame")
+	line1.Size = UDim2.new(0, 50, 0, 1)
+	line1.Position = UDim2.new(0, 0, 0.5, 0)
+	line1.BackgroundColor3 = THEME.Border
+	line1.BorderSizePixel = 0
+	line1.Parent = row
+	Instance.new("UICorner", line1).CornerRadius = UDim.new(1, 0)
+
+	local lbl = Instance.new("TextLabel")
+	lbl.Size = UDim2.new(0, 140, 0, 14)
+	lbl.Position = UDim2.new(0.5, -70, 0, 3)
+	lbl.BackgroundTransparency = 1
+	lbl.Text = L(textKey)
+	lbl.TextColor3 = THEME.TextDim
+	lbl.Font = Enum.Font.GothamBold
+	lbl.TextSize = 11
+	lbl.Parent = row
+
+	local line2 = Instance.new("Frame")
+	line2.Size = UDim2.new(0, 50, 0, 1)
+	line2.Position = UDim2.new(1, -50, 0.5, 0)
+	line2.BackgroundColor3 = THEME.Border
+	line2.BorderSizePixel = 0
+	line2.Parent = row
+	Instance.new("UICorner", line2).CornerRadius = UDim.new(1, 0)
+
+	-- dil değişince yazıyı güncelle
+	table.insert(langUpdaters, function() lbl.Text = L(textKey) end)
+end
+
+-- Toggle (NEON KIRMIZI)
+local function makeToggle(textKey, get, toggle)
+	local row = Instance.new("Frame")
+	row.Size = UDim2.new(1, 0, 0, 40)
+	row.BackgroundColor3 = THEME.Panel
+	row.BorderSizePixel = 0
+	row.Parent = body
+	Instance.new("UICorner", row).CornerRadius = UDim.new(0, 10)
+	Instance.new("UIStroke", row).Color = THEME.Border
+
+	local label = Instance.new("TextLabel")
+	label.Size = UDim2.new(1, -60, 1, 0)
+	label.Position = UDim2.new(0, 14, 0, 0)
+	label.BackgroundTransparency = 1
+	label.Text = L(textKey)
+	label.TextColor3 = THEME.Text
+	label.Font = Enum.Font.Gotham
+	label.TextSize = 14
+	label.TextXAlignment = Enum.TextXAlignment.Left
+	label.Parent = row
+
+	local dot = Instance.new("Frame")
+	dot.Size = UDim2.fromOffset(22, 22)
+	dot.AnchorPoint = Vector2.new(1, 0.5)
+	dot.Position = UDim2.new(1, -12, 0.5, 0)
+	dot.BackgroundColor3 = get() and THEME.Success or THEME.AccentDim
+	dot.Parent = row
+	Instance.new("UICorner", dot).CornerRadius = UDim.new(1, 0)
+
+	local glow = Instance.new("UIStroke")
+	glow.Color = THEME.Neon
+	glow.Thickness = 3
+	glow.Transparency = get() and 0 or 1
+	glow.Parent = dot
+
+	local btn = Instance.new("TextButton")
+	btn.Size = UDim2.new(1, 0, 1, 0)
+	btn.BackgroundTransparency = 1
+	btn.Text = ""
+	btn.Parent = row
+
+	local function refresh()
+		dot.BackgroundColor3 = get() and THEME.Success or THEME.AccentDim
+		glow.Transparency = get() and 0 or 1
+		label.Text = L(textKey)
+	end
+	btn.MouseButton1Click:Connect(function()
+		toggle()
+		refresh()
+	end)
+
+	table.insert(langUpdaters, refresh)
+	refresh()
+end
+
+-- Slider
+local function makeSlider(textKey, min, max, decimals, get, set)
+	local row = Instance.new("Frame")
+	row.Size = UDim2.new(1, 0, 0, 54)
+	row.BackgroundColor3 = THEME.Panel
+	row.BorderSizePixel = 0
+	row.Parent = body
+	Instance.new("UICorner", row).CornerRadius = UDim.new(0, 10)
+	Instance.new("UIStroke", row).Color = THEME.Border
+
+	local label = Instance.new("TextLabel")
+	label.Size = UDim2.new(1, 0, 0, 18)
+	label.Position = UDim2.new(0, 14, 0, 8)
+	label.BackgroundTransparency = 1
+	label.Text = L(textKey) .. ": " .. string.format("%." .. decimals .. "f", get())
+	label.TextColor3 = THEME.Text
+	label.Font = Enum.Font.Gotham
+	label.TextSize = 13
+	label.TextXAlignment = Enum.TextXAlignment.Left
+	label.Parent = row
+
+	local bg = Instance.new("Frame")
+	bg.Size = UDim2.new(1, -28, 0, 6)
+	bg.Position = UDim2.new(0, 14, 0, 32)
+	bg.BackgroundColor3 = THEME.Border
+	bg.BorderSizePixel = 0
+	bg.Parent = row
+	Instance.new("UICorner", bg).CornerRadius = UDim.new(1, 0)
+
+	local fill = Instance.new("Frame")
+	fill.BackgroundColor3 = THEME.Accent
+	fill.BorderSizePixel = 0
+	fill.Parent = bg
+	Instance.new("UICorner", fill).CornerRadius = UDim.new(1, 0)
+
+	local function refresh()
+		local rel = (get() - min) / (max - min)
+		fill.Size = UDim2.new(math.clamp(rel, 0, 1), 0, 1, 0)
+		label.Text = L(textKey) .. ": " .. string.format("%." .. decimals .. "f", get())
+	end
+
+	local dragging = false
+	local function update(inputX)
+		local rel = math.clamp((inputX - bg.AbsolutePosition.X) / bg.AbsoluteSize.X, 0, 1)
+		set(min + (max - min) * rel)
+		refresh()
+	end
+	bg.InputBegan:Connect(function(i)
+		if i.UserInputType == Enum.UserInputType.MouseButton1 or i.UserInputType == Enum.UserInputType.Touch then
+			dragging = true; update(i.Position.X)
+		end
+	end)
+	UserInputService.InputChanged:Connect(function(i)
+		if dragging and (i.UserInputType == Enum.UserInputType.MouseMovement or i.UserInputType == Enum.UserInputType.Touch) then
+			update(i.Position.X)
+		end
+	end)
+	UserInputService.InputEnded:Connect(function(i)
+		if i.UserInputType == Enum.UserInputType.MouseButton1 or i.UserInputType == Enum.UserInputType.Touch then
+			dragging = false
+		end
+	end)
+
+	table.insert(langUpdaters, refresh)
+	refresh()
+end
+
+----------------------------------------------------------------
+-- MOBİL AIM BUTONU (yuvarlak, boyutu ayarlanır, sabitlenebilir)
+----------------------------------------------------------------
+local aimGui = Instance.new("ScreenGui")
+aimGui.Name = "RzAimBtn"
+aimGui.ResetOnSpawn = false
+aimGui.IgnoreGuiInset = true
+aimGui.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
+aimGui.Parent = lp:WaitForChild("PlayerGui")
+
+local aimBtn = Instance.new("TextButton")
+aimBtn.AnchorPoint = Vector2.new(0.5, 0.5)
+aimBtn.Size = UDim2.fromOffset(cfg.BtnSize, cfg.BtnSize)
+aimBtn.Position = UDim2.fromOffset(cam.ViewportSize.X * 0.85, cam.ViewportSize.Y * 0.6)
+aimBtn.BackgroundColor3 = THEME.Panel
+aimBtn.AutoButtonColor = false
+aimBtn.Text = "AIM"
+aimBtn.Font = Enum.Font.GothamBold
+aimBtn.TextColor3 = THEME.Text
+aimBtn.TextSize = math.floor(cfg.BtnSize * 0.3)
+aimBtn.Visible = cfg.ShowAimBtn
+aimBtn.Parent = aimGui
+Instance.new("UICorner", aimBtn).CornerRadius = UDim.new(1, 0)
+
+local aimStroke = Instance.new("UIStroke")
+aimStroke.Color = THEME.Accent
+aimStroke.Thickness = 3
+aimStroke.Parent = aimBtn
+
+local function refreshAimBtn()
+	aimBtn.Visible = cfg.ShowAimBtn
+	local sz = cfg.BtnSize
+	aimBtn.Size = UDim2.fromOffset(sz, sz)
+	aimBtn.TextSize = math.max(10, math.floor(sz * 0.3))
+	if not cfg.BtnLocked then
+		-- sürükleme modu: soluk görünür
+		aimBtn.BackgroundColor3 = THEME.Panel
+		aimBtn.BackgroundTransparency = 0.5
+		aimBtn.TextColor3 = THEME.TextDim
+		aimStroke.Color = THEME.TextDim
+	elseif aiming then
+		aimBtn.BackgroundColor3 = THEME.Accent
+		aimBtn.BackgroundTransparency = 0.15
+		aimBtn.TextColor3 = Color3.new(1, 1, 1)
+		aimStroke.Color = Color3.new(1, 1, 1)
+	else
+		aimBtn.BackgroundColor3 = THEME.Panel
+		aimBtn.BackgroundTransparency = 0.25
+		aimBtn.TextColor3 = THEME.Text
+		aimStroke.Color = THEME.Accent
+	end
+end
+
+task.spawn(function()
+	while true do
+		task.wait(0.1)
+		refreshAimBtn()
+	end
+end)
+
+-- Basma / sürükleme
+local btnDrag, btnInput, btnDragStart, btnStartPos = false, nil, nil, nil
+local btnHeld = false
+
+aimBtn.InputBegan:Connect(function(input)
+	local t = input.UserInputType
+	if t ~= Enum.UserInputType.MouseButton1 and t ~= Enum.UserInputType.Touch then return end
+	btnInput = input
+
+	if cfg.BtnLocked then
+		-- sabit: aim butonu gibi çalışır
+		btnHeld = true
+		if cfg.HoldToAim then
+			aiming = true
+		else
+			aiming = not aiming
+			notify(aiming and L("NotifyOn") or L("NotifyOff"))
+		end
+	else
+		-- sabit değil: sürükleyerek taşı
+		btnDrag = true
+		btnDragStart = input.Position
+		btnStartPos = aimBtn.Position
+	end
+end)
+
+UserInputService.InputChanged:Connect(function(input)
+	if not btnDrag then return end
+	if input.UserInputType == Enum.UserInputType.MouseMovement or input == btnInput then
+		local delta = input.Position - btnDragStart
+		local vs = cam.ViewportSize
+		aimBtn.Position = UDim2.fromOffset(
+			math.clamp(btnStartPos.X.Offset + delta.X, 0, vs.X),
+			math.clamp(btnStartPos.Y.Offset + delta.Y, 0, vs.Y)
+		)
+	end
+end)
+
+UserInputService.InputEnded:Connect(function(input)
+	local t = input.UserInputType
+	if t ~= Enum.UserInputType.MouseButton1 and t ~= Enum.UserInputType.Touch then return end
+	if not btnInput then return end
+	if input == btnInput or (t == Enum.UserInputType.MouseButton1 and btnInput.UserInputType == Enum.UserInputType.MouseButton1) then
+		if btnHeld and cfg.HoldToAim then aiming = false end
+		btnHeld = false
+		btnDrag = false
+		btnInput = nil
+	end
+end)
+
+----------------------------------------------------------------
+-- AYARLAR
+----------------------------------------------------------------
+separator("Gen")
+
+makeToggle("HoldMode", function() return cfg.HoldToAim end,
+	function() cfg.HoldToAim = not cfg.HoldToAim; aiming = false; notify(cfg.HoldToAim and L("HoldOn") or L("HoldOff") .. cfg.ToggleKey.Name) end)
+makeToggle("Sticky", function() return cfg.Sticky end,
+	function() cfg.Sticky = not cfg.Sticky end)
+makeToggle("Team", function() return cfg.TeamCheck end,
+	function() cfg.TeamCheck = not cfg.TeamCheck end)
+makeToggle("Wall", function() return cfg.WallCheck end,
+	function() cfg.WallCheck = not cfg.WallCheck end)
+makeToggle("Highlight", function() return cfg.Highlight end,
+	function() cfg.Highlight = not cfg.Highlight if not cfg.Highlight then clearHighlight() end end)
+makeToggle("Circle", function() return cfg.ShowCircle end,
+	function() cfg.ShowCircle = not cfg.ShowCircle end)
+makeToggle("Esp", function() return cfg.Esp end,
+	function() cfg.Esp = not cfg.Esp if not cfg.Esp then clearAllEsp() end end)
+
+separator("Settings")
+
+makeSlider("Fov", 30, 500, 0, function() return cfg.FOV end, function(v) cfg.FOV = v end)
+makeSlider("Smooth", 0.05, 1, 2, function() return cfg.Smoothing end, function(v) cfg.Smoothing = v end)
+makeSlider("Pred", 0, 0.5, 2, function() return cfg.Prediction end, function(v) cfg.Prediction = v end)
+
+-- Mobil buton ayarları
+separator("Mobile")
+
+makeToggle("AimBtn", function() return cfg.ShowAimBtn end,
+	function() cfg.ShowAimBtn = not cfg.ShowAimBtn; refreshAimBtn() end)
+makeToggle("BtnLock", function() return cfg.BtnLocked end,
+	function() cfg.BtnLocked = not cfg.BtnLocked; aiming = false; refreshAimBtn() end)
+makeSlider("BtnSize", 40, 140, 0, function() return cfg.BtnSize end,
+	function(v) cfg.BtnSize = math.floor(v); refreshAimBtn() end)
+
+-- Dil seçici
+separator("Lang")
+
+local langBtn = Instance.new("TextButton")
+langBtn.Size = UDim2.new(1, 0, 0, 40)
+langBtn.BackgroundColor3 = THEME.Panel
+langBtn.BorderSizePixel = 0
+langBtn.Text = ""
+langBtn.Parent = body
+Instance.new("UICorner", langBtn).CornerRadius = UDim.new(0, 10)
+Instance.new("UIStroke", langBtn).Color = THEME.Border
+
+local langLabel = Instance.new("TextLabel")
+langLabel.Size = UDim2.new(1, -60, 1, 0)
+langLabel.Position = UDim2.new(0, 14, 0, 0)
+langLabel.BackgroundTransparency = 1
+langLabel.Text = currentLang == "TR" and "Türkçe" or "English"
+langLabel.TextColor3 = THEME.Text
+langLabel.Font = Enum.Font.Gotham
+langLabel.TextSize = 14
+langLabel.TextXAlignment = Enum.TextXAlignment.Left
+langLabel.Parent = langBtn
+
+local langDot = Instance.new("Frame")
+langDot.Size = UDim2.fromOffset(20, 20)
+langDot.AnchorPoint = Vector2.new(1, 0.5)
+langDot.Position = UDim2.new(1, -12, 0.5, 0)
+langDot.BackgroundColor3 = currentLang == "TR" and THEME.Success or THEME.AccentDim
+langDot.Parent = langBtn
+Instance.new("UICorner", langDot).CornerRadius = UDim.new(1, 0)
+
+langBtn.MouseButton1Click:Connect(function()
+	currentLang = currentLang == "TR" and "EN" or "TR"
+	cfg.Language = currentLang
+	title.Text = L("Title")
+	subtitle.Text = L("Sub")
+	statusLabel.Text = L("Target")
+	langLabel.Text = currentLang == "TR" and "Türkçe" or "English"
+	langDot.BackgroundColor3 = currentLang == "TR" and THEME.Success or THEME.AccentDim
+
+	-- tüm toggle / slider / ayraç yazılarını güncelle
+	for _, f in ipairs(langUpdaters) do
+		f()
+	end
+
+	notify(currentLang == "TR" and "Dil: Türkçe" or "Language: English")
+end)
+
+notify(L("NotifyLoad"))
+
+----------------------------------------------------------------
+-- SÜRÜKLEME
+----------------------------------------------------------------
+local dragging = false
+local dragStart = nil
+local startPos = nil
+
+header.InputBegan:Connect(function(input)
+	if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
+		dragging = true
+		dragStart = input.Position
+		startPos = main.Position
+	end
+end)
+
+UserInputService.InputChanged:Connect(function(input)
+	if dragging and (input.UserInputType == Enum.UserInputType.MouseMovement or input.UserInputType == Enum.UserInputType.Touch) then
+		local delta = input.Position - dragStart
+		main.Position = UDim2.new(
+			startPos.X.Scale, startPos.X.Offset + delta.X,
+			startPos.Y.Scale, startPos.Y.Offset + delta.Y
+		)
+	end
+end)
+
+UserInputService.InputEnded:Connect(function(input)
+	if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
+		dragging = false
+	end
+end)
+
+-- Minimize
+local minimized = false
+minimize.MouseButton1Click:Connect(function()
+	minimized = not minimized
+	body.Visible = not minimized
+	main.Size = minimized and UDim2.fromOffset(300, 48) or UDim2.fromOffset(300, 500)
+	minimize.Text = minimized and "+" or "—"
+end)
